@@ -1,0 +1,13 @@
+[package]
+name = "learnchain"
+version = "0.1.0"
+description = "learn to code while using genai to build"
+authors = ["Dave Norman <david.norman.w@gmail.com>"]
+license = "MIT"
+edition = "2024"
+
+[dependencies]
+crossterm = "0.28.1"
+ratatui = "0.29.0"
+color-eyre = "0.6.3"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
