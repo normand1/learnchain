@@ -1,6 +1,11 @@
+use super::events_manager::EventsManager;
 use crate::{
-    App, ai_manager::StructuredLearningResponse, log_util::log_debug, reset_learning_feedback,
+    App, AppView,
+    ai_manager::{self, StructuredLearningResponse},
+    log_util::log_debug,
+    reset_learning_feedback,
 };
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rand::{seq::SliceRandom, thread_rng};
 
 pub(crate) struct LearningManager<'a> {
@@ -12,12 +17,138 @@ impl<'a> LearningManager<'a> {
         Self { app }
     }
 
+    pub(crate) fn ensure_indices_for(app: &'a mut App) {
+        Self::new(app).ensure_indices();
+    }
+
+    pub(crate) fn show_learning(app: &'a mut App) {
+        if app.learning_response.is_some() {
+            app.view = AppView::Learning;
+            Self::ensure_indices_for(app);
+            log_debug("App: opened learning view");
+        } else {
+            App::push_error(
+                &mut app.error,
+                "No learning response available. Generate one from the menu.".to_string(),
+            );
+        }
+    }
+
     pub(crate) fn shuffle_quiz_options(response: &mut StructuredLearningResponse) {
         let mut rng = thread_rng();
         for group in &mut response.response {
             for quiz in &mut group.quiz {
                 quiz.options.shuffle(&mut rng);
             }
+        }
+    }
+
+    pub(crate) fn handle_key(&mut self, key: KeyEvent) {
+        if self.app.learning_waiting_for_next {
+            self.app.learning_waiting_for_next = false;
+            self.next_question();
+            return;
+        }
+
+        match (key.modifiers, key.code) {
+            (KeyModifiers::NONE, KeyCode::Left | KeyCode::Char('h')) => self.previous_group(),
+            (KeyModifiers::NONE, KeyCode::Right | KeyCode::Char('l')) => self.next_group(),
+            (KeyModifiers::NONE, KeyCode::Down | KeyCode::Char('j')) => self.next_option(),
+            (KeyModifiers::NONE, KeyCode::Up | KeyCode::Char('k')) => self.previous_option(),
+            (KeyModifiers::NONE, KeyCode::Char('n'))
+            | (KeyModifiers::NONE, KeyCode::Char('N'))
+            | (KeyModifiers::NONE, KeyCode::Char(']'))
+            | (KeyModifiers::NONE, KeyCode::Char('}'))
+            | (KeyModifiers::NONE, KeyCode::PageDown)
+            | (KeyModifiers::NONE, KeyCode::Tab) => self.next_question(),
+            (KeyModifiers::NONE, KeyCode::Char('p'))
+            | (KeyModifiers::NONE, KeyCode::Char('P'))
+            | (KeyModifiers::NONE, KeyCode::Char('['))
+            | (KeyModifiers::NONE, KeyCode::Char('{'))
+            | (KeyModifiers::NONE, KeyCode::PageUp)
+            | (KeyModifiers::NONE, KeyCode::BackTab) => self.previous_question(),
+            (KeyModifiers::NONE, KeyCode::Enter)
+            | (KeyModifiers::NONE, KeyCode::Char(' '))
+            | (KeyModifiers::NONE, KeyCode::Char('s')) => self.select_option(),
+            (KeyModifiers::NONE, KeyCode::Char('r')) | (KeyModifiers::NONE, KeyCode::Char('R')) => {
+                ai_manager::trigger_learning_response(self.app)
+            }
+            (KeyModifiers::NONE, KeyCode::Char('m')) => self.app.return_to_menu(),
+            (KeyModifiers::NONE, KeyCode::Char('e')) => EventsManager::show_events(self.app),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn ensure_indices(&mut self) {
+        let response_empty = self
+            .app
+            .learning_response
+            .as_ref()
+            .map(|resp| resp.response.is_empty())
+            .unwrap_or(true);
+        if response_empty {
+            self.app.learning_group_index = 0;
+            self.app.learning_quiz_index = 0;
+            self.app.learning_option_index = 0;
+            Self::reset_feedback_state(self.app);
+            return;
+        }
+
+        let group_len = self
+            .app
+            .learning_response
+            .as_ref()
+            .map(|resp| resp.response.len())
+            .unwrap_or(0);
+
+        if group_len == 0 {
+            self.app.learning_group_index = 0;
+            self.app.learning_quiz_index = 0;
+            self.app.learning_option_index = 0;
+            Self::reset_feedback_state(self.app);
+            return;
+        }
+
+        if self.app.learning_group_index >= group_len {
+            self.app.learning_group_index = 0;
+            Self::reset_feedback_state(self.app);
+        }
+
+        let quiz_len = self
+            .app
+            .learning_response
+            .as_ref()
+            .and_then(|resp| resp.response.get(self.app.learning_group_index))
+            .map(|group| group.quiz.len())
+            .unwrap_or(0);
+
+        if quiz_len == 0 {
+            self.app.learning_quiz_index = 0;
+            self.app.learning_option_index = 0;
+            Self::reset_feedback_state(self.app);
+            return;
+        }
+
+        if self.app.learning_quiz_index >= quiz_len {
+            self.app.learning_quiz_index = 0;
+            Self::reset_feedback_state(self.app);
+        }
+
+        let option_len = self
+            .app
+            .learning_response
+            .as_ref()
+            .and_then(|resp| resp.response.get(self.app.learning_group_index))
+            .and_then(|group| group.quiz.get(self.app.learning_quiz_index))
+            .map(|question| question.options.len())
+            .unwrap_or(0);
+
+        if option_len == 0 {
+            self.app.learning_option_index = 0;
+            Self::reset_feedback_state(self.app);
+        } else if self.app.learning_option_index >= option_len {
+            self.app.learning_option_index = 0;
+            Self::reset_feedback_state(self.app);
         }
     }
 
@@ -32,7 +163,7 @@ impl<'a> LearningManager<'a> {
             self.app.learning_group_index + 1,
             total_groups
         ));
-        self.app.ensure_learning_indices();
+        self.ensure_indices();
     }
 
     pub(crate) fn previous_group(&mut self) {
@@ -50,7 +181,7 @@ impl<'a> LearningManager<'a> {
             self.app.learning_group_index + 1,
             total_groups
         ));
-        self.app.ensure_learning_indices();
+        self.ensure_indices();
     }
 
     pub(crate) fn next_question(&mut self) {
@@ -66,7 +197,7 @@ impl<'a> LearningManager<'a> {
             quiz_len,
             self.app.learning_group_index + 1
         ));
-        self.app.ensure_learning_indices();
+        self.ensure_indices();
     }
 
     pub(crate) fn previous_question(&mut self) {
@@ -86,7 +217,7 @@ impl<'a> LearningManager<'a> {
             quiz_len,
             self.app.learning_group_index + 1
         ));
-        self.app.ensure_learning_indices();
+        self.ensure_indices();
     }
 
     pub(crate) fn next_option(&mut self) {
@@ -101,7 +232,7 @@ impl<'a> LearningManager<'a> {
             option_len,
             self.app.learning_quiz_index + 1
         ));
-        self.app.ensure_learning_indices();
+        self.ensure_indices();
     }
 
     pub(crate) fn previous_option(&mut self) {
@@ -120,7 +251,7 @@ impl<'a> LearningManager<'a> {
             option_len,
             self.app.learning_quiz_index + 1
         ));
-        self.app.ensure_learning_indices();
+        self.ensure_indices();
     }
 
     pub(crate) fn select_option(&mut self) {
@@ -196,10 +327,14 @@ impl<'a> LearningManager<'a> {
     }
 
     fn reset_feedback(&mut self) {
+        Self::reset_feedback_state(self.app);
+    }
+
+    pub(crate) fn reset_feedback_state(app: &mut App) {
         reset_learning_feedback(
-            &mut self.app.learning_feedback,
-            &mut self.app.learning_summary_revealed,
-            &mut self.app.learning_waiting_for_next,
+            &mut app.learning_feedback,
+            &mut app.learning_summary_revealed,
+            &mut app.learning_waiting_for_next,
         );
     }
 }
