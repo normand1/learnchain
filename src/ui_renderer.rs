@@ -1,4 +1,7 @@
-use crate::{AI_LOADING_FRAMES, App, AppView, MENU_OPTIONS, config, reset_learning_feedback};
+use crate::{
+    AI_LOADING_FRAMES, App, AppView, MENU_OPTIONS, config, reset_learning_feedback,
+    view_managers::LearningManager,
+};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
@@ -48,21 +51,42 @@ impl<'a> UiRenderer<'a> {
             layout[0],
         );
 
-        let menu_items: Vec<ListItem> = MENU_OPTIONS
+        let menu_sections = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(3)])
+            .split(layout[1]);
+
+        let actions_items = vec![ListItem::new(MENU_OPTIONS[0])];
+        let mut actions_state = ListState::default();
+        if app.menu_index == 0 {
+            actions_state.select(Some(0));
+        }
+
+        frame.render_stateful_widget(
+            List::new(actions_items)
+                .block(Block::bordered().title(Line::from("Actions")))
+                .highlight_symbol("▶ ")
+                .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+            menu_sections[0],
+            &mut actions_state,
+        );
+
+        let config_items: Vec<ListItem> = MENU_OPTIONS[1..]
             .iter()
             .map(|label| ListItem::new(*label))
             .collect();
-
-        let mut list_state = ListState::default();
-        list_state.select(Some(app.menu_index));
+        let mut config_state = ListState::default();
+        if app.menu_index > 0 {
+            config_state.select(Some(app.menu_index - 1));
+        }
 
         frame.render_stateful_widget(
-            List::new(menu_items)
-                .block(Block::bordered().title(Line::from("Main Menu")))
+            List::new(config_items)
+                .block(Block::bordered().title(Line::from("Config")))
                 .highlight_symbol("▶ ")
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
-            layout[1],
-            &mut list_state,
+            menu_sections[1],
+            &mut config_state,
         );
 
         let mut status_lines = vec![
@@ -72,7 +96,7 @@ impl<'a> UiRenderer<'a> {
         if app.learning_response.is_some() {
             status_lines.push("Press l to revisit the latest learning response.".to_string());
         }
-        status_lines.push("Press c to configure default limits.".to_string());
+        status_lines.push("Press c to configure details.".to_string());
         if let Some(status) = &app.ai_status {
             status_lines.push(format!("AI: {}", status));
         }
@@ -215,7 +239,7 @@ impl<'a> UiRenderer<'a> {
 
     fn render_learning(&mut self, frame: &mut Frame) {
         let app = &mut *self.app;
-        app.ensure_learning_indices();
+        LearningManager::ensure_indices_for(app);
 
         let header_title = Line::from(format!("Codex Sessions • {}", app.session_date))
             .bold()
@@ -255,20 +279,16 @@ impl<'a> UiRenderer<'a> {
                 frame_symbol
             );
             resources_text = String::from("Resources will appear after generation completes.");
-            status_lines.push("Waiting for AI to finish generation.".to_string());
         } else if let Some(response) = &app.learning_response {
             if response.response.is_empty() {
                 question_text =
                     String::from("The generated response did not include any knowledge groups.");
                 resources_text = String::from("No additional resources provided.");
-                status_lines.push("Learning response contained no topics.".to_string());
             } else {
                 let group_count = response.response.len();
                 let group_index = app.learning_group_index.min(group_count.saturating_sub(1));
                 let group = &response.response[group_index];
                 let quiz_count = group.quiz.len();
-                let mut displayed_question_index = 0;
-
                 let language_line = match group.knowledge_type_language.trim() {
                     "" => String::new(),
                     lang => format!("\nLanguage: {}", lang),
@@ -327,6 +347,11 @@ impl<'a> UiRenderer<'a> {
                     } else {
                         String::new()
                     };
+                    let feedback_line = if let Some(feedback) = app.learning_feedback.as_deref() {
+                        format!("\n\nFeedback: {}", feedback)
+                    } else {
+                        String::new()
+                    };
 
                     if app.learning_waiting_for_next {
                         let mut segments = vec![format!(
@@ -344,7 +369,7 @@ impl<'a> UiRenderer<'a> {
                         question_text = segments.join("\n\n");
                     } else {
                         question_text = format!(
-                            "Knowledge group {}/{}\nName: {}{}\n\nQuestion {}/{}:\n{}\n\nOptions:\n{}{}",
+                            "Knowledge group {}/{}\nName: {}{}\n\nQuestion {}/{}:\n{}\n\nOptions:\n{}{}{}",
                             group_index + 1,
                             group_count,
                             group.knowledge_type_group,
@@ -353,11 +378,11 @@ impl<'a> UiRenderer<'a> {
                             quiz_count,
                             question.question,
                             options_text,
+                            feedback_line,
                             summary_line
                         );
                     }
 
-                    displayed_question_index = quiz_index + 1;
                     app.learning_option_index = app
                         .learning_option_index
                         .min(option_count.saturating_sub(1));
@@ -374,45 +399,11 @@ impl<'a> UiRenderer<'a> {
                         .collect::<Vec<_>>()
                         .join("\n")
                 };
-
-                status_lines.push(format!(
-                    "Topics: {}/{} • Questions: {}/{}",
-                    group_index + 1,
-                    group_count,
-                    displayed_question_index,
-                    quiz_count
-                ));
-
-                if quiz_count > 0 {
-                    if let Some(question) = group.quiz.get(app.learning_quiz_index) {
-                        if !question.options.is_empty() {
-                            let selected_option =
-                                app.learning_option_index.min(question.options.len() - 1);
-                            let label = ((b'A' + (selected_option % 26) as u8) as char).to_string();
-                            if !app.learning_waiting_for_next {
-                                status_lines.push(format!(
-                                    "Selected option: {} ({}/{})",
-                                    label,
-                                    selected_option + 1,
-                                    question.options.len()
-                                ));
-                            }
-                            if let Some(feedback) = &app.learning_feedback {
-                                if !app.learning_waiting_for_next {
-                                    status_lines.insert(0, format!("Result: {}", feedback));
-                                }
-                            }
-                        }
-                    }
-                }
             }
         }
 
-        status_lines.push("←/→ or h/l change topics. ↑/↓ or j/k move between answers.".to_string());
-        status_lines.push(
-            "n/]/PageDown/Tab next question • p/[/PageUp/Shift+Tab previous question • Enter/Space to check answer.".to_string(),
-        );
-        status_lines.push("m for menu. e for events.".to_string());
+        status_lines.push("Press r to regenerate quiz from the latest session events.".to_string());
+        status_lines.push("Press m to return to the main menu.".to_string());
 
         frame.render_widget(
             Paragraph::new(question_text)

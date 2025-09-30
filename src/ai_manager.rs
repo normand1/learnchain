@@ -1,14 +1,23 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    sync::mpsc,
+    sync::mpsc::TryRecvError,
+    thread,
     time::SystemTime,
 };
 
-use crate::{config, log_util};
+use crate::{
+    AI_LOADING_FRAMES, AiTaskMessage, App, AppView, config,
+    log_util::{self, log_debug},
+    output_manager::OutputManager,
+    reset_learning_feedback,
+    view_managers::LearningManager,
+};
 use color_eyre::eyre::{Context, ContextCompat, Result, eyre};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Value, json, to_string_pretty};
 
 const JSON_SCHEMA: &str = r#"{
   "type": "object",
@@ -312,6 +321,138 @@ impl AiManager {
     }
 }
 
+pub(crate) fn handle_ai_success(app: &mut App, mut structured: StructuredLearningResponse) {
+    LearningManager::shuffle_quiz_options(&mut structured);
+    let group_count = structured.response.len();
+    let total_questions: usize = structured
+        .response
+        .iter()
+        .map(|group| group.quiz.len())
+        .sum();
+
+    let save_result = write_ai_response(app, &structured);
+    let mut status_parts = Vec::new();
+    match save_result {
+        Ok(saved_path) => {
+            status_parts.push(format!("Saved to {}", saved_path.display()));
+            log_debug(&format!(
+                "App: learning response saved to {}",
+                saved_path.display()
+            ));
+        }
+        Err(err) => {
+            App::push_error(
+                &mut app.error,
+                format!("Failed to save learning response: {}", err),
+            );
+            status_parts.push("Failed to save learning response".to_string());
+            log_debug(&format!("App: failed to write learning response: {}", err));
+        }
+    }
+
+    status_parts.push(format!("Knowledge groups: {}", group_count));
+    status_parts.push(format!("Total quiz questions: {}", total_questions));
+    app.ai_status = Some(status_parts.join(" • "));
+
+    app.learning_group_index = 0;
+    app.learning_quiz_index = 0;
+    app.learning_option_index = 0;
+    reset_learning_feedback(
+        &mut app.learning_feedback,
+        &mut app.learning_summary_revealed,
+        &mut app.learning_waiting_for_next,
+    );
+    app.learning_response = Some(structured);
+    log_debug(&format!(
+        "App: loaded learning response with {} group(s)",
+        group_count
+    ));
+
+    app.view = AppView::Learning;
+    log_debug("App: switched to learning view");
+}
+
+pub(crate) fn handle_ai_error(app: &mut App, message: String) {
+    let trimmed = message.trim().to_string();
+    if trimmed.starts_with("Failed to build Tokio runtime") {
+        App::push_error(&mut app.error, trimmed.clone());
+        log_debug(&format!("App: {}", trimmed));
+        app.ai_status = Some("Unable to start AI runtime".to_string());
+    } else {
+        App::push_error(&mut app.error, format!("AI generation failed: {}", trimmed));
+        log_debug(&format!("App: AI generation error: {}", trimmed));
+        app.ai_status = Some("AI generation failed".to_string());
+    }
+
+    if !matches!(app.view, AppView::Learning) {
+        app.view = AppView::Menu;
+    }
+}
+
+pub(crate) fn trigger_learning_response(app: &mut App) {
+    log_debug("App: menu option 'Generate learning response' selected");
+    if app.ai_loading {
+        log_debug("App: AI generation already in progress; ignoring duplicate request");
+        return;
+    }
+
+    let manager = match app.ai_manager.clone() {
+        Some(manager) => manager,
+        None => {
+            App::push_error(
+                &mut app.error,
+                "AI manager unavailable. Configure OPENAI_API_KEY.".to_string(),
+            );
+            log_debug("App: AI manager unavailable; aborting generation");
+            return;
+        }
+    };
+
+    let (sender, receiver) = mpsc::channel();
+    app.ai_result_receiver = Some(receiver);
+    app.ai_loading = true;
+    app.ai_loading_frame = 0;
+    app.update_loading_status();
+    app.view = AppView::Learning;
+    log_debug("App: displaying learning loading spinner");
+    log_debug("App: starting OpenAI generation task");
+
+    thread::spawn(move || {
+        log_debug("App: background OpenAI generation task started");
+        let runtime = match tokio::runtime::Runtime::new() {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                let _ = sender.send(AiTaskMessage::Error(format!(
+                    "Failed to build Tokio runtime: {}",
+                    err
+                )));
+                return;
+            }
+        };
+
+        let result = runtime.block_on(manager.generate_learning_response());
+        drop(runtime);
+
+        match result {
+            Ok(structured) => {
+                let _ = sender.send(AiTaskMessage::Success(structured));
+            }
+            Err(err) => {
+                let _ = sender.send(AiTaskMessage::Error(err.to_string()));
+            }
+        }
+    });
+}
+
+impl App {
+    pub(crate) fn update_loading_status(&mut self) {
+        if self.ai_loading {
+            let frame = AI_LOADING_FRAMES[self.ai_loading_frame % AI_LOADING_FRAMES.len()];
+            self.ai_status = Some(format!("{} Generating learning response…", frame));
+        }
+    }
+}
+
 fn schema_value() -> Value {
     serde_json::from_str(JSON_SCHEMA).expect("JSON_SCHEMA is valid")
 }
@@ -344,5 +485,58 @@ fn extract_completion_text(value: &Value) -> Option<String> {
             }
         }
         _ => None,
+    }
+}
+
+fn write_ai_response(app: &App, response: &StructuredLearningResponse) -> Result<PathBuf> {
+    let manager = OutputManager::new();
+    let output_dir = manager.output_directory().map_err(|err| eyre!(err))?;
+    fs::create_dir_all(&output_dir).wrap_err_with(|| {
+        format!(
+            "failed to create output directory at {}",
+            output_dir.display()
+        )
+    })?;
+
+    let mut path = output_dir.join(format!("learning-response-{}.json", app.session_date));
+    let mut counter = 2;
+    while path.exists() {
+        path = output_dir.join(format!(
+            "learning-response-{}-{}.json",
+            app.session_date, counter
+        ));
+        counter += 1;
+    }
+
+    let serialized =
+        to_string_pretty(response).wrap_err("failed to serialise learning response to JSON")?;
+    fs::write(&path, serialized)
+        .wrap_err_with(|| format!("failed to write learning response to {}", path.display()))?;
+    Ok(path)
+}
+
+pub(crate) fn poll_ai_messages(app: &mut App) {
+    let mut clear_receiver = false;
+    if let Some(receiver) = app.ai_result_receiver.as_ref() {
+        match receiver.try_recv() {
+            Ok(message) => {
+                app.ai_loading = false;
+                clear_receiver = true;
+                match message {
+                    AiTaskMessage::Success(response) => handle_ai_success(app, response),
+                    AiTaskMessage::Error(message) => handle_ai_error(app, message),
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                app.ai_loading = false;
+                clear_receiver = true;
+                handle_ai_error(app, "Background AI worker disconnected".to_string());
+            }
+        }
+    }
+
+    if clear_receiver {
+        app.ai_result_receiver = None;
     }
 }
