@@ -1,7 +1,6 @@
 .env
 /output
-dist/learnchain-*
-dist/learnchain.js
+/dist
 bin/learnchain
 .DS_Store
 config/app_config.toml
