@@ -7,6 +7,10 @@
   "bin": {
     "learnchain": "dist/learnchain.js"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/normand1/learnchain"
+  },
   "scripts": {
     "build": "cargo build --release",
     "build:all": "echo 'Use GitHub Actions workflow to build all platform binaries'",
