@@ -458,7 +458,7 @@ mod tests {
 
     #[test]
     fn multiple_group_quiz_advances_and_wraps_groups() {
-        let response = load_learning_response("test_artifacts/multiple_knowledge_type_groups.json");
+        let response = load_learning_response("test_fixtures/multiple_knowledge_type_groups.json");
         let mut app = app_with_response(response);
 
         LearningManager::show_learning(&mut app);
@@ -502,7 +502,7 @@ mod tests {
 
     #[test]
     fn single_group_quiz_cycles_questions_without_group_change() {
-        let response = load_learning_response("test_artifacts/single_knowledge_type_group.json");
+        let response = load_learning_response("test_fixtures/single_knowledge_type_group.json");
         let mut app = app_with_response(response);
 
         LearningManager::show_learning(&mut app);
