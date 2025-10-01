@@ -1,5 +1,5 @@
 {
-  "name": "learnchain-cli",
+  "name": "learnchain",
   "version": "0.1.0",
   "description": "Terminal-based learning tool that analyzes AI coding sessions and generates interactive quizzes",
   "license": "MIT",
