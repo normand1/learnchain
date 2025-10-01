@@ -1,8 +1,9 @@
 {
   "name": "learnchain-cli",
   "version": "0.1.0",
-  "description": "Learns from Codex or Claude session logs and surfaces quizzes in the terminal UI.",
+  "description": "Terminal-based learning tool that analyzes AI coding sessions and generates interactive quizzes",
   "license": "MIT",
+  "author": "Dave Norman <david.norman.w@gmail.com>",
   "bin": {
     "learnchain": "dist/learnchain.js"
   },
@@ -12,23 +13,28 @@
   },
   "scripts": {
     "build": "cargo build --release",
-    "postinstall": "node scripts/install.js"
+    "build:all": "echo 'Use GitHub Actions workflow to build all platform binaries'",
+    "postinstall": "node scripts/install.js",
+    "prepublishOnly": "node scripts/generate-launcher.js"
   },
   "files": [
-    "bin/",
     "dist/",
     "scripts/install.js",
-    "Cargo.toml",
-    "Cargo.lock",
-    "src/",
     "README.md",
     "LICENSE"
   ],
   "keywords": [
     "learnchain",
     "tui",
+    "terminal",
+    "cli",
+    "learning",
+    "quiz",
+    "ai",
     "codex",
-    "cli"
+    "claude",
+    "education",
+    "rust"
   ],
   "engines": {
     "node": ">=16"
