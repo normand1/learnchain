@@ -1,63 +1,61 @@
 #!/usr/bin/env node
-const { spawnSync } = require('child_process');
-const { existsSync, mkdirSync, copyFileSync, chmodSync, writeFileSync } = require('fs');
+const { existsSync, chmodSync } = require('fs');
 const path = require('path');
 
 const projectRoot = path.join(__dirname, '..');
-
-function run(command, args) {
-  const result = spawnSync(command, args, {
-    cwd: projectRoot,
-    stdio: 'inherit'
-  });
-
-  if (result.status !== 0) {
-    process.exit(result.status ?? 1);
-  }
-}
-
-run('cargo', ['build', '--release']);
-
 const platform = process.platform;
 const arch = process.arch;
-const binaryName = platform === 'win32' ? 'learnchain.exe' : 'learnchain';
-const sourcePath = path.join(projectRoot, 'target', 'release', binaryName);
 
-if (!existsSync(sourcePath)) {
-  console.error(`learnchain binary not found at ${sourcePath}. Did the build succeed?`);
+// Map Node.js platform/arch to our binary naming convention
+const getBinaryName = () => {
+  const platformMap = {
+    'darwin': 'darwin',
+    'linux': 'linux',
+    'win32': 'win32'
+  };
+
+  const archMap = {
+    'arm64': 'arm64',
+    'x64': 'x64'
+  };
+
+  const mappedPlatform = platformMap[platform];
+  const mappedArch = archMap[arch];
+
+  if (!mappedPlatform || !mappedArch) {
+    console.error(`Unsupported platform: ${platform}-${arch}`);
+    console.error('Supported platforms: macOS (arm64/x64), Linux (x64), Windows (x64)');
+    process.exit(1);
+  }
+
+  const ext = platform === 'win32' ? '.exe' : '';
+  return `learnchain-${mappedPlatform}-${mappedArch}${ext}`;
+};
+
+const binaryName = getBinaryName();
+const binaryPath = path.join(projectRoot, 'dist', binaryName);
+
+// Verify the pre-compiled binary exists
+if (!existsSync(binaryPath)) {
+  console.error(`Pre-compiled binary not found: ${binaryName}`);
+  console.error(`Expected at: ${binaryPath}`);
+  console.error('\nThis might mean:');
+  console.error('1. Your platform is not supported');
+  console.error('2. The package was not built correctly');
+  console.error(`\nSupported: darwin-arm64, darwin-x64, linux-x64, win32-x64`);
+  console.error(`Your platform: ${platform}-${arch}`);
   process.exit(1);
 }
 
-const distDir = path.join(projectRoot, 'dist');
-mkdirSync(distDir, { recursive: true });
-
-const packagedBinaryName = `learnchain-${platform}-${arch}${platform === 'win32' ? '.exe' : ''}`;
-const binaryDest = path.join(distDir, packagedBinaryName);
-copyFileSync(sourcePath, binaryDest);
-chmodSync(binaryDest, 0o755);
-
-const launcherPath = path.join(distDir, 'learnchain.js');
-const launcher = `#!/usr/bin/env node\n` +
-  `const { spawn } = require('child_process');\n` +
-  `const path = require('path');\n` +
-  `const fs = require('fs');\n` +
-  `const binaryName = ${JSON.stringify(packagedBinaryName)};\n` +
-  `const binPath = path.join(__dirname, binaryName);\n` +
-  `if (!fs.existsSync(binPath)) {\n` +
-  `  console.error('learnchain binary not found for this platform.');\n` +
-  `  process.exit(1);\n` +
-  `}\n` +
-  `const child = spawn(binPath, process.argv.slice(2), { stdio: 'inherit' });\n` +
-  `child.on('close', (code) => process.exit(code ?? 0));\n`;
-writeFileSync(launcherPath, launcher, { mode: 0o755 });
-chmodSync(launcherPath, 0o755);
-
-console.log(`learnchain binary packaged for ${platform}/${arch}`);
-
-const envKey = process.env.OPENAI_API_KEY;
-if (envKey && envKey.trim().length > 0) {
-  console.log('Configuring OpenAI API key from environment...');
-  run('node', [launcherPath, '--set-openai-key', envKey.trim()]);
-} else {
-  console.log('Tip: run `npx learnchain --set-openai-key <your-key>` or use the Config view to add your OpenAI API key.');
+// Make binary executable (Unix systems)
+if (platform !== 'win32') {
+  try {
+    chmodSync(binaryPath, 0o755);
+  } catch (err) {
+    console.warn(`Warning: Could not make binary executable: ${err.message}`);
+  }
 }
+
+console.log(`✓ learnchain installed successfully for ${platform}-${arch}`);
+console.log('\nRun: npx learnchain --help');
+console.log('Tip: Run `npx learnchain --set-openai-key <your-key>` to configure your OpenAI API key.');
