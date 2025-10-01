@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    fs,
     path::{Path, PathBuf},
     sync::mpsc,
     sync::mpsc::TryRecvError,
@@ -70,19 +70,20 @@ const JSON_SCHEMA: &str = r#"{
                       "is_correct_answer"
                     ]
                   }
+                },
+                "resources": {
+                  "type": "array",
+                  "description": "an optional list of resources that can help the user learn more about this specific question",
+                  "items": {
+                    "type": "string"
+                  }
                 }
               },
               "required": [
                 "question",
-                "options"
+                "options",
+                "resources"
               ]
-            }
-          },
-          "resources": {
-            "type": "array",
-            "description": "an optional list of resources that can help the user learn more about the knowledge subject",
-            "items": {
-              "type": "string"
             }
           },
           "knowledge_type_language": {
@@ -94,7 +95,6 @@ const JSON_SCHEMA: &str = r#"{
           "knowledge_type_group",
           "summary",
           "quiz",
-          "resources",
           "knowledge_type_language"
         ]
       }
@@ -123,8 +123,6 @@ pub struct KnowledgeResponse {
     #[serde(default)]
     pub quiz: Vec<QuizItem>,
     #[serde(default)]
-    pub resources: Vec<String>,
-    #[serde(default)]
     pub knowledge_type_language: String,
 }
 
@@ -134,6 +132,8 @@ pub struct QuizItem {
     pub question: String,
     #[serde(default)]
     pub options: Vec<QuizOption>,
+    #[serde(default)]
+    pub resources: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -170,13 +170,16 @@ impl AiManager {
         }
     }
 
-    /// Construct an [`AiManager`] by reading the `OPENAI_API_KEY` environment variable.
-    pub fn from_env(
+    /// Construct an [`AiManager`] using the configured API key.
+    pub fn from_config(
         output_root: impl Into<PathBuf>,
         model_name: impl Into<String>,
+        api_key: impl Into<String>,
     ) -> Result<Self> {
-        let api_key = env::var("OPENAI_API_KEY")
-            .wrap_err("OPENAI_API_KEY environment variable is not set")?;
+        let api_key = api_key.into();
+        if api_key.trim().is_empty() {
+            return Err(eyre!("OpenAI API key is not configured"));
+        }
         Ok(Self::new(api_key, output_root, model_name))
     }
 
@@ -225,23 +228,35 @@ impl AiManager {
             .ok_or_else(|| eyre!("no markdown files found in {}", root.display()))
     }
 
-    /// Execute the OpenAI request using the latest markdown summary and return a structured response.
-    pub async fn generate_learning_response(&self) -> Result<StructuredLearningResponse> {
-        let latest_markdown = self.latest_markdown_file()?;
-        log_util::log_debug(&format!(
-            "AiManager: selected markdown file {}",
-            latest_markdown.display()
-        ));
-        let summary_content = fs::read_to_string(&latest_markdown).wrap_err_with(|| {
-            format!(
-                "failed to read contents of latest markdown file at {}",
+    /// Execute the OpenAI request using the provided markdown summary (or the most recent file) and return a structured response.
+    pub async fn generate_learning_response(
+        &self,
+        summary_override: Option<String>,
+    ) -> Result<StructuredLearningResponse> {
+        let summary_content = if let Some(summary) = summary_override {
+            log_util::log_debug(&format!(
+                "AiManager: using in-memory summary ({} bytes)",
+                summary.len()
+            ));
+            summary
+        } else {
+            let latest_markdown = self.latest_markdown_file()?;
+            log_util::log_debug(&format!(
+                "AiManager: selected markdown file {}",
                 latest_markdown.display()
-            )
-        })?;
-        log_util::log_debug(&format!(
-            "AiManager: summary size = {} bytes",
-            summary_content.len()
-        ));
+            ));
+            let summary = fs::read_to_string(&latest_markdown).wrap_err_with(|| {
+                format!(
+                    "failed to read contents of latest markdown file at {}",
+                    latest_markdown.display()
+                )
+            })?;
+            log_util::log_debug(&format!(
+                "AiManager: summary size = {} bytes",
+                summary.len()
+            ));
+            summary
+        };
 
         let prompt = self.build_prompt(&summary_content);
         let schema = schema_value();
@@ -399,10 +414,8 @@ pub(crate) fn trigger_learning_response(app: &mut App) {
     let manager = match app.ai_manager.clone() {
         Some(manager) => manager,
         None => {
-            App::push_error(
-                &mut app.error,
-                "AI manager unavailable. Configure OPENAI_API_KEY.".to_string(),
-            );
+            App::push_error(&mut app.error, crate::OPENAI_KEY_HELP.to_string());
+            app.ai_status = Some(crate::OPENAI_KEY_HELP.to_string());
             log_debug("App: AI manager unavailable; aborting generation");
             return;
         }
@@ -417,6 +430,8 @@ pub(crate) fn trigger_learning_response(app: &mut App) {
     log_debug("App: displaying learning loading spinner");
     log_debug("App: starting OpenAI generation task");
 
+    let summary_override = app.summary_content.clone();
+
     thread::spawn(move || {
         log_debug("App: background OpenAI generation task started");
         let runtime = match tokio::runtime::Runtime::new() {
@@ -430,7 +445,7 @@ pub(crate) fn trigger_learning_response(app: &mut App) {
             }
         };
 
-        let result = runtime.block_on(manager.generate_learning_response());
+        let result = runtime.block_on(manager.generate_learning_response(summary_override));
         drop(runtime);
 
         match result {
@@ -489,6 +504,15 @@ fn extract_completion_text(value: &Value) -> Option<String> {
 }
 
 fn write_ai_response(app: &App, response: &StructuredLearningResponse) -> Result<PathBuf> {
+    if !app.write_output_artifacts {
+        let serialized =
+            to_string_pretty(response).wrap_err("failed to serialise learning response to JSON")?;
+        return Ok(PathBuf::from(format!(
+            "<in-memory: {} bytes>",
+            serialized.len()
+        )));
+    }
+
     let manager = OutputManager::new();
     let output_dir = manager.output_directory().map_err(|err| eyre!(err))?;
     fs::create_dir_all(&output_dir).wrap_err_with(|| {
@@ -538,5 +562,200 @@ pub(crate) fn poll_ai_messages(app: &mut App) {
 
     if clear_receiver {
         app.ai_result_receiver = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AppConfig, ConfigForm, OpenAiModelKind};
+    use std::{path::{Path, PathBuf}, sync::mpsc};
+
+    fn test_app() -> App {
+        App {
+            running: false,
+            view: AppView::Menu,
+            menu_index: 0,
+            events: Vec::new(),
+            selected_event: None,
+            session_dir: PathBuf::new(),
+            session_date: "2024-05-01".to_string(),
+            session_source: String::new(),
+            latest_file: None,
+            summary_file: None,
+            summary_content: None,
+            error: None,
+            ai_manager: None,
+            ai_status: None,
+            ai_loading: false,
+            ai_loading_frame: 0,
+            ai_result_receiver: None,
+            learning_response: None,
+            learning_group_index: 0,
+            learning_quiz_index: 0,
+            learning_option_index: 0,
+            learning_feedback: None,
+            learning_summary_revealed: false,
+            learning_waiting_for_next: false,
+            config_form: ConfigForm::from_config(AppConfig::default()),
+            write_output_artifacts: false,
+            openai_model: OpenAiModelKind::Gpt5Mini,
+        }
+    }
+
+    fn sample_response() -> StructuredLearningResponse {
+        StructuredLearningResponse {
+            response: vec![KnowledgeResponse {
+                knowledge_type_group: "Rust Basics".to_string(),
+                summary: "Borrowing overview".to_string(),
+                quiz: vec![QuizItem {
+                    question: "What does borrow checking ensure?".to_string(),
+                    options: vec![
+                        QuizOption {
+                            selection: "Memory safety".to_string(),
+                            is_correct_answer: true,
+                        },
+                        QuizOption {
+                            selection: "Runtime polymorphism".to_string(),
+                            is_correct_answer: false,
+                        },
+                    ],
+                    resources: vec!["https://doc.rust-lang.org/".to_string()],
+                }],
+                knowledge_type_language: "Rust".to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn extract_completion_text_handles_string_and_array() {
+        let value = json!({
+            "choices": [
+                {
+                    "message": {
+                        "content": "direct string"
+                    }
+                }
+            ]
+        });
+        assert_eq!(extract_completion_text(&value), Some("direct string".to_string()));
+
+        let array_value = json!({
+            "choices": [
+                {
+                    "message": {
+                        "content": [
+                            {"text": "part one"},
+                            {"text": "part two"}
+                        ]
+                    }
+                }
+            ]
+        });
+        assert_eq!(extract_completion_text(&array_value), Some("part onepart two".to_string()));
+
+        let missing = json!({});
+        assert!(extract_completion_text(&missing).is_none());
+    }
+
+    #[test]
+    fn write_ai_response_returns_in_memory_path_when_not_persisting() {
+        let app = test_app();
+        let path = write_ai_response(&app, &sample_response()).unwrap();
+        let display = path.display().to_string();
+        assert!(display.starts_with("<in-memory:"));
+        assert!(display.contains("bytes>"));
+    }
+
+    #[test]
+    fn handle_ai_success_sets_learning_state_and_status() {
+        let mut app = test_app();
+        handle_ai_success(&mut app, sample_response());
+
+        assert_eq!(app.view, AppView::Learning);
+        assert_eq!(app.learning_group_index, 0);
+        assert_eq!(app.learning_quiz_index, 0);
+        assert_eq!(app.learning_option_index, 0);
+        assert!(app.learning_response.is_some());
+        assert!(app.learning_feedback.is_none());
+        assert!(!app.learning_summary_revealed);
+        assert!(!app.learning_waiting_for_next);
+        let status = app.ai_status.as_ref().unwrap();
+        assert!(status.contains("Knowledge groups: 1"));
+        assert!(status.contains("Total quiz questions: 1"));
+    }
+
+    #[test]
+    fn handle_ai_error_distinguishes_runtime_failure() {
+        let mut app = test_app();
+        app.view = AppView::Learning;
+        handle_ai_error(
+            &mut app,
+            "Failed to build Tokio runtime: missing permissions".to_string(),
+        );
+
+        let error = app.error.as_ref().unwrap();
+        assert!(error.contains("Failed to build Tokio runtime"));
+        assert_eq!(app.ai_status.as_deref(), Some("Unable to start AI runtime"));
+        assert_eq!(app.view, AppView::Learning);
+
+        let mut app = test_app();
+        handle_ai_error(&mut app, "network issue".to_string());
+        let error = app.error.as_ref().unwrap();
+        assert!(error.contains("AI generation failed: network issue"));
+        assert_eq!(app.ai_status.as_deref(), Some("AI generation failed"));
+        assert_eq!(app.view, AppView::Menu);
+    }
+
+    #[test]
+    fn trigger_learning_response_without_manager_surfaces_error() {
+        let mut app = test_app();
+        trigger_learning_response(&mut app);
+        let error = app.error.as_ref().unwrap();
+        assert!(error.contains(crate::OPENAI_KEY_HELP));
+        assert_eq!(app.ai_status.as_deref(), Some(crate::OPENAI_KEY_HELP));
+        assert!(!app.ai_loading);
+        assert_eq!(app.view, AppView::Menu);
+    }
+
+    #[test]
+    fn poll_ai_messages_processes_success_and_clears_receiver() {
+        let mut app = test_app();
+        app.ai_loading = true;
+        let (sender, receiver) = mpsc::channel();
+        app.ai_result_receiver = Some(receiver);
+        sender.send(AiTaskMessage::Success(sample_response())).unwrap();
+
+        poll_ai_messages(&mut app);
+
+        assert!(!app.ai_loading);
+        assert!(app.ai_result_receiver.is_none());
+        assert!(app.learning_response.is_some());
+        assert_eq!(app.view, AppView::Learning);
+    }
+
+    #[test]
+    fn poll_ai_messages_processes_error_and_clears_receiver() {
+        let mut app = test_app();
+        app.ai_loading = true;
+        let (sender, receiver) = mpsc::channel();
+        app.ai_result_receiver = Some(receiver);
+        sender
+            .send(AiTaskMessage::Error("failure".to_string()))
+            .unwrap();
+
+        poll_ai_messages(&mut app);
+
+        assert!(!app.ai_loading);
+        assert!(app.ai_result_receiver.is_none());
+        let error = app.error.as_ref().unwrap();
+        assert!(error.contains("AI generation failed: failure"));
+    }
+
+    #[test]
+    fn is_markdown_detects_md_extension() {
+        assert!(is_markdown(Path::new("note.md")));
+        assert!(is_markdown(Path::new("note.MD")));
+        assert!(!is_markdown(Path::new("note.txt")));
     }
 }

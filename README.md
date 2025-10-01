@@ -12,3 +12,28 @@ Copyright (c) Dave Norman <david.norman.w@gmail.com>
 This project is licensed under the MIT license ([LICENSE] or <http://opensource.org/licenses/MIT>)
 
 [LICENSE]: ./LICENSE
+
+## Building From Source
+
+- `cargo build` — compile the TUI and verify that the dependency graph is coherent.
+- `cargo run` — launch the terminal UI to exercise menu flows, the “Configure defaults” view, and AI generation loops.
+- `cargo test -- --nocapture` — execute unit and integration suites while preserving tracing output.
+- `cargo fmt` / `cargo clippy --all-targets --all-features` — enforce formatting and lint rules.
+- `npm run build` — compile a release binary (used by the npm packaging workflow).
+
+## Distributing on npm
+
+The repository also ships an npm manifest so the CLI can be distributed via the npm registry. The publish workflow is:
+
+```bash
+npm install            # install JS tooling alongside the Rust workspace
+npm run build          # compile the release binary
+npx learnchain --help  # optional smoke test after install
+npx learnchain --set-openai-key sk-...  # store your OpenAI API key securely in config
+npm version patch      # bump version before publishing
+npm publish            # push the package to the registry
+```
+
+The `postinstall` script runs `cargo build --release`, copies the resulting executable into `dist/learnchain-<platform>-<arch>`, and generates a lightweight JavaScript launcher (`dist/learnchain.js`) declared in the package `bin` section. When consumers install the npm package, the launcher invokes the platform-specific binary that ships alongside it.
+
+At runtime, configure your OpenAI credentials either via the TUI (Config view → “OpenAI API key”, press Enter to edit) or with the CLI helper shown above; the key is stored in `config/app_config.toml` and no longer depends on a local `.env` file.

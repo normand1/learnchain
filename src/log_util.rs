@@ -1,4 +1,4 @@
-use crate::output_manager::OutputManager;
+use crate::{config, output_manager::OutputManager};
 use chrono::Utc;
 use std::{
     fs::OpenOptions,
@@ -16,6 +16,9 @@ pub fn log_debug(message: &str) {
 }
 
 fn append_line(message: &str) -> io::Result<()> {
+    if !config::current().write_output_artifacts {
+        return Ok(());
+    }
     let manager = OutputManager::new();
     let path = resolve_log_path(&manager)?;
     let mut file = OpenOptions::new().create(true).append(true).open(&path)?;

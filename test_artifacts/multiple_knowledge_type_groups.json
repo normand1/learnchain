@@ -1,0 +1,164 @@
+{
+  "response": [
+    {
+      "knowledge_type_group": "Shell builtins and external commands",
+      "summary": "Understand the difference between Bash builtins (internal to the shell) and external commands (separate executables). Builtins like cd modify shell state, while external commands run as separate processes.",
+      "quiz": [
+        {
+          "question": "Which of the following is a Bash shell builtin (not an external program)?",
+          "options": [
+            {
+              "selection": "python",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "grep",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "ls",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "cd",
+              "is_correct_answer": true
+            }
+          ],
+          "resources": [
+            "https://www.gnu.org/software/bash/manual/html_node/Bash-Builtins.html",
+            "https://tldp.org/LDP/abs/html/internal.html"
+          ]
+        }
+      ],
+      "knowledge_type_language": "Bash"
+    },
+    {
+      "knowledge_type_group": "File listing and options",
+      "summary": "Common ls flags: -l produces a long/detailed listing; -a includes hidden files (names starting with .). Combining flags gives both behaviors.",
+      "quiz": [
+        {
+          "question": "What does the command 'ls -la' typically do?",
+          "options": [
+            {
+              "selection": "List files sorted by modification time in reverse",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "Recursively list all files in subdirectories",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "Show all files (including hidden) in long format with details",
+              "is_correct_answer": true
+            },
+            {
+              "selection": "Only show directories in the current folder",
+              "is_correct_answer": false
+            }
+          ],
+          "resources": [
+            "https://www.gnu.org/software/coreutils/manual/html_node/ls-invocation.html",
+            "https://linuxcommand.org/lc3_lts0110.php"
+          ]
+        }
+      ],
+      "knowledge_type_language": "Bash"
+    },
+    {
+      "knowledge_type_group": "Reading files and pagination",
+      "summary": "Use cat to quickly stream file contents; use less (a pager) to view large files interactively with scrolling and search.",
+      "quiz": [
+        {
+          "question": "Which statement correctly distinguishes 'cat' from 'less' when viewing files in a shell?",
+          "options": [
+            {
+              "selection": "Both commands paginate output by default",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "less concatenates multiple files while cat displays only the first",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "cat streams the whole file to stdout; less provides a pager allowing scrolling",
+              "is_correct_answer": true
+            },
+            {
+              "selection": "cat opens an interactive editor for the file; less modifies the file in-place",
+              "is_correct_answer": false
+            }
+          ],
+          "resources": [
+            "https://linux.die.net/man/1/cat",
+            "https://linux.die.net/man/1/less"
+          ]
+        }
+      ],
+      "knowledge_type_language": "Bash"
+    },
+    {
+      "knowledge_type_group": "Text searching with grep",
+      "summary": "Common grep flags: -n prints line numbers, -i ignores case, -v inverts the match, -r searches recursively.",
+      "quiz": [
+        {
+          "question": "Which grep option prints matching lines with their line numbers?",
+          "options": [
+            {
+              "selection": "Recursively search directories",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "Invert the match, showing non-matching lines",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "Perform a case-insensitive search",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "Show matching lines with line numbers",
+              "is_correct_answer": true
+            }
+          ],
+          "resources": [
+            "https://www.gnu.org/software/grep/manual/grep.html",
+            "https://linux.die.net/man/1/grep"
+          ]
+        }
+      ],
+      "knowledge_type_language": "Bash"
+    },
+    {
+      "knowledge_type_group": "Here-documents and quoting",
+      "summary": "A here-document starts with <<WORD. Quoting the delimiter (e.g., <<'EOF') prevents parameter expansion, command substitution, and arithmetic expansion inside the document.",
+      "quiz": [
+        {
+          "question": "In Bash, what is the effect of starting a here-document with <<'PATCH' (single-quoted delimiter)?",
+          "options": [
+            {
+              "selection": "The delimiter is removed and the shell executes the content as commands",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "The here-document is treated literally: variables and command substitutions are NOT expanded",
+              "is_correct_answer": true
+            },
+            {
+              "selection": "The here-document is written to /dev/null",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "Variables are expanded but command substitutions are not",
+              "is_correct_answer": false
+            }
+          ],
+          "resources": [
+            "https://www.gnu.org/software/bash/manual/html_node/Here-Documents.html",
+            "https://tldp.org/LDP/abs/html/here-docs.html"
+          ]
+        }
+      ],
+      "knowledge_type_language": "Bash"
+    }
+  ]
+}

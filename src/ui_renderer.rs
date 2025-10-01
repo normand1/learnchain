@@ -1,5 +1,6 @@
+use crate::view_managers::menu_manager::MENU_OPTIONS;
 use crate::{
-    AI_LOADING_FRAMES, App, AppView, MENU_OPTIONS, config, reset_learning_feedback,
+    AI_LOADING_FRAMES, App, AppView, config, reset_learning_feedback,
     view_managers::LearningManager,
 };
 use ratatui::{
@@ -30,7 +31,12 @@ impl<'a> UiRenderer<'a> {
 
     fn render_menu(&mut self, frame: &mut Frame) {
         let app = &mut *self.app;
-        let header_title = Line::from(format!("Codex Sessions • {}", app.session_date))
+        let session_title = if app.session_source == "Claude Code" {
+            "Claude Sessions"
+        } else {
+            "Codex Sessions"
+        };
+        let header_title = Line::from(format!("{} • {}", session_title, app.session_date))
             .bold()
             .blue()
             .centered();
@@ -89,20 +95,20 @@ impl<'a> UiRenderer<'a> {
             &mut config_state,
         );
 
-        let mut status_lines = vec![
-            "Use ↑/↓ or j/k to choose. Press Enter to select.".to_string(),
-            "Press 1, 2, or 3 for quick selection. Esc, Ctrl-C, or q to quit.".to_string(),
-        ];
+        let mut status_lines = Vec::new();
+        if let Some(error) = &app.error {
+            status_lines.push(format!("Error: {}", error));
+        }
+        if let Some(status) = &app.ai_status {
+            status_lines.push(format!("AI: {}", status));
+        }
+        status_lines.push("Use ↑/↓ or j/k to choose. Press Enter to select.".to_string());
+        status_lines
+            .push("Press 1, 2, or 3 for quick selection. Esc, Ctrl-C, or q to quit.".to_string());
         if app.learning_response.is_some() {
             status_lines.push("Press l to revisit the latest learning response.".to_string());
         }
         status_lines.push("Press c to configure details.".to_string());
-        if let Some(status) = &app.ai_status {
-            status_lines.push(format!("AI: {}", status));
-        }
-        if let Some(error) = &app.error {
-            status_lines.push(format!("Error: {}", error));
-        }
 
         frame.render_widget(
             Paragraph::new(status_lines.join("\n"))
@@ -113,7 +119,12 @@ impl<'a> UiRenderer<'a> {
 
     fn render_events(&mut self, frame: &mut Frame) {
         let app = &mut *self.app;
-        let header_title = Line::from(format!("Codex Sessions • {}", app.session_date))
+        let session_title = if app.session_source == "Claude Code" {
+            "Claude Sessions"
+        } else {
+            "Codex Sessions"
+        };
+        let header_title = Line::from(format!("{} • {}", session_title, app.session_date))
             .bold()
             .blue()
             .centered();
@@ -216,18 +227,19 @@ impl<'a> UiRenderer<'a> {
             body[1],
         );
 
-        let mut status_lines = vec![
-            format!("Matching events: {}", app.events.len()),
-            "Use ↑/↓ or j/k to navigate. Press m for menu. Esc, Ctrl-C, or q to quit.".to_string(),
-        ];
-        if app.learning_response.is_some() {
-            status_lines.push("Press l to view generated learning prompts.".to_string());
+        let mut status_lines = Vec::new();
+        if let Some(error) = &app.error {
+            status_lines.push(format!("Error: {}", error));
         }
         if let Some(status) = &app.ai_status {
             status_lines.push(format!("AI: {}", status));
         }
-        if let Some(error) = &app.error {
-            status_lines.push(format!("Error: {}", error));
+        status_lines.push(format!("Matching events: {}", app.events.len()));
+        status_lines.push(
+            "Use ↑/↓ or j/k to navigate. Press m for menu. Esc, Ctrl-C, or q to quit.".to_string(),
+        );
+        if app.learning_response.is_some() {
+            status_lines.push("Press l to view generated learning prompts.".to_string());
         }
 
         frame.render_widget(
@@ -241,7 +253,12 @@ impl<'a> UiRenderer<'a> {
         let app = &mut *self.app;
         LearningManager::ensure_indices_for(app);
 
-        let header_title = Line::from(format!("Codex Sessions • {}", app.session_date))
+        let session_title = if app.session_source == "Claude Code" {
+            "Claude Sessions"
+        } else {
+            "Codex Sessions"
+        };
+        let header_title = Line::from(format!("{} • {}", session_title, app.session_date))
             .bold()
             .blue()
             .centered();
@@ -309,6 +326,7 @@ impl<'a> UiRenderer<'a> {
                         &mut app.learning_summary_revealed,
                         &mut app.learning_waiting_for_next,
                     );
+                    resources_text = String::from("No additional resources provided.");
                 } else {
                     let quiz_index = app.learning_quiz_index.min(quiz_count - 1);
                     let question = group.quiz.get(quiz_index).cloned().unwrap_or_default();
@@ -386,22 +404,28 @@ impl<'a> UiRenderer<'a> {
                     app.learning_option_index = app
                         .learning_option_index
                         .min(option_count.saturating_sub(1));
-                }
 
-                resources_text = if group.resources.is_empty() {
-                    String::from("No additional resources provided.")
-                } else {
-                    group
-                        .resources
-                        .iter()
-                        .enumerate()
-                        .map(|(index, resource)| format!("{}. {}", index + 1, resource))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                };
+                    resources_text = if question.resources.is_empty() {
+                        String::from("No additional resources provided.")
+                    } else {
+                        question
+                            .resources
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, resource)| format!("{}. {}", index + 1, resource))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    };
+                }
             }
         }
 
+        if let Some(error) = &app.error {
+            status_lines.push(format!("Error: {}", error));
+        }
+        if let Some(status) = &app.ai_status {
+            status_lines.push(format!("AI: {}", status));
+        }
         status_lines.push("Press r to regenerate quiz from the latest session events.".to_string());
         status_lines.push("Press m to return to the main menu.".to_string());
 
@@ -419,13 +443,6 @@ impl<'a> UiRenderer<'a> {
             main_sections[1],
         );
 
-        if let Some(status) = &app.ai_status {
-            status_lines.push(format!("AI: {}", status));
-        }
-        if let Some(error) = &app.error {
-            status_lines.push(format!("Error: {}", error));
-        }
-
         frame.render_widget(
             Paragraph::new(status_lines.join("\n"))
                 .block(Block::bordered().title(Line::from("Status"))),
@@ -435,7 +452,12 @@ impl<'a> UiRenderer<'a> {
 
     fn render_config(&mut self, frame: &mut Frame) {
         let app = &mut *self.app;
-        let header_title = Line::from(format!("Codex Sessions • {}", app.session_date))
+        let session_title = if app.session_source == "Claude Code" {
+            "Claude Sessions"
+        } else {
+            "Codex Sessions"
+        };
+        let header_title = Line::from(format!("{} • {}", session_title, app.session_date))
             .bold()
             .blue()
             .centered();
@@ -471,6 +493,30 @@ impl<'a> UiRenderer<'a> {
                 "Minimum quiz questions (AI prompt): {}",
                 app.config_form.min_quiz_questions
             )),
+            ListItem::new(format!(
+                "Session source: {}",
+                app.config_form.session_source.label()
+            )),
+            ListItem::new(format!(
+                "Write artifacts to output: {}",
+                if app.config_form.write_output_artifacts {
+                    "Enabled"
+                } else {
+                    "Disabled"
+                }
+            )),
+            ListItem::new(format!(
+                "OpenAI model: {}",
+                app.config_form.openai_model.label()
+            )),
+            ListItem::new(if app.config_form.is_editing_openai_key() {
+                format!(
+                    "OpenAI API key (editing): {}",
+                    app.config_form.masked_openai_key_buffer()
+                )
+            } else {
+                format!("OpenAI API key: {}", app.config_form.masked_openai_key())
+            }),
         ];
 
         let mut list_state = ListState::default();
@@ -485,19 +531,28 @@ impl<'a> UiRenderer<'a> {
             &mut list_state,
         );
 
-        let mut status_lines = vec![
-            "↑/↓ or j/k choose field. ←/→ or h/l adjust value.".to_string(),
-            "Press s or Enter to save, r to reset, m for menu.".to_string(),
-        ];
+        let mut status_lines = Vec::new();
+        if let Some(error) = &app.error {
+            status_lines.push(format!("Error: {}", error));
+        }
+        if let Some(ai_status) = &app.ai_status {
+            status_lines.push(format!("AI: {}", ai_status));
+        }
+        status_lines.push(
+            "↑/↓ or j/k choose field. ←/→ or h/l adjust value or cycle source/model toggles."
+                .to_string(),
+        );
+        status_lines.push(
+            "Select \"OpenAI API key\" and press Enter to edit. Type to update, Enter to save, Esc to cancel.".to_string(),
+        );
+        status_lines
+            .push("Press s to save, r to reset, m to save and return to the menu.".to_string());
 
         if app.config_form.dirty {
             status_lines.push("Unsaved changes".to_string());
         }
-        if let Some(status) = &app.config_form.status {
-            status_lines.push(status.clone());
-        }
-        if let Some(error) = &app.error {
-            status_lines.push(format!("Error: {}", error));
+        if let Some(config_status) = &app.config_form.status {
+            status_lines.push(config_status.clone());
         }
 
         frame.render_widget(
@@ -512,15 +567,25 @@ impl<'a> UiRenderer<'a> {
             Some(path) => format!("Latest file: {}", path.display()),
             None => "Latest file: <none>".to_string(),
         };
-        let summary_line = match &app.summary_file {
-            Some(path) => format!("Summary: {}", path.display()),
-            None => "Summary: <none>".to_string(),
+        let summary_line = if !app.write_output_artifacts {
+            if app.summary_content.is_some() {
+                "Summary: <in-memory>".to_string()
+            } else {
+                "Summary: <none>".to_string()
+            }
+        } else {
+            match &app.summary_file {
+                Some(path) => format!("Summary: {}", path.display()),
+                None => "Summary: <none>".to_string(),
+            }
         };
+        let source_line = format!("Source: {}", app.session_source);
         format!(
-            "Directory: {}\n{}\n{}",
+            "Directory: {}\n{}\n{}\n{}",
             app.session_dir.display(),
             latest_line,
-            summary_line
+            summary_line,
+            source_line
         )
     }
 }

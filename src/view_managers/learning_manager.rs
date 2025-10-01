@@ -185,38 +185,52 @@ impl<'a> LearningManager<'a> {
     }
 
     pub(crate) fn next_question(&mut self) {
-        let Some(quiz_len) = self.active_group_quiz_len() else {
+        if let Some(quiz_len) = self.active_group_quiz_len() {
+            if self.app.learning_quiz_index + 1 < quiz_len {
+                self.app.learning_quiz_index += 1;
+                self.app.learning_option_index = 0;
+                self.reset_feedback();
+                log_debug(&format!(
+                    "App: moved to question {} of {} in group {}",
+                    self.app.learning_quiz_index + 1,
+                    quiz_len,
+                    self.app.learning_group_index + 1
+                ));
+                self.ensure_indices();
+                return;
+            }
+        }
+
+        if self.move_to_next_group_with_quiz() {
             return;
-        };
-        self.app.learning_quiz_index = (self.app.learning_quiz_index + 1) % quiz_len;
-        self.app.learning_option_index = 0;
+        }
+
         self.reset_feedback();
-        log_debug(&format!(
-            "App: moved to question {} of {} in group {}",
-            self.app.learning_quiz_index + 1,
-            quiz_len,
-            self.app.learning_group_index + 1
-        ));
         self.ensure_indices();
     }
 
     pub(crate) fn previous_question(&mut self) {
-        let Some(quiz_len) = self.active_group_quiz_len() else {
-            return;
-        };
-        if self.app.learning_quiz_index == 0 {
-            self.app.learning_quiz_index = quiz_len - 1;
-        } else {
-            self.app.learning_quiz_index -= 1;
+        if let Some(quiz_len) = self.active_group_quiz_len() {
+            if self.app.learning_quiz_index > 0 {
+                self.app.learning_quiz_index -= 1;
+                self.app.learning_option_index = 0;
+                self.reset_feedback();
+                log_debug(&format!(
+                    "App: moved to question {} of {} in group {}",
+                    self.app.learning_quiz_index + 1,
+                    quiz_len,
+                    self.app.learning_group_index + 1
+                ));
+                self.ensure_indices();
+                return;
+            }
         }
-        self.app.learning_option_index = 0;
+
+        if self.move_to_previous_group_with_quiz() {
+            return;
+        }
+
         self.reset_feedback();
-        log_debug(&format!(
-            "App: moved to question {} of {} in group {}",
-            self.app.learning_quiz_index + 1,
-            quiz_len,
-            self.app.learning_group_index + 1
-        ));
         self.ensure_indices();
     }
 
@@ -301,11 +315,15 @@ impl<'a> LearningManager<'a> {
         if total == 0 { None } else { Some(total) }
     }
 
-    fn active_group_quiz_len(&self) -> Option<usize> {
+    fn group_quiz_len(&self, group_index: usize) -> Option<usize> {
         let response = self.app.learning_response.as_ref()?;
-        let group = response.response.get(self.app.learning_group_index)?;
+        let group = response.response.get(group_index)?;
         let quiz_len = group.quiz.len();
         if quiz_len == 0 { None } else { Some(quiz_len) }
+    }
+
+    fn active_group_quiz_len(&self) -> Option<usize> {
+        self.group_quiz_len(self.app.learning_group_index)
     }
 
     fn active_option_count(&self) -> Option<usize> {
@@ -320,6 +338,58 @@ impl<'a> LearningManager<'a> {
         }
     }
 
+    fn move_to_next_group_with_quiz(&mut self) -> bool {
+        let Some(total_groups) = self.total_groups() else {
+            return false;
+        };
+
+        for offset in 1..=total_groups {
+            let next_index = (self.app.learning_group_index + offset) % total_groups;
+            if let Some(next_quiz_len) = self.group_quiz_len(next_index) {
+                self.app.learning_group_index = next_index;
+                self.app.learning_quiz_index = 0;
+                self.app.learning_option_index = 0;
+                self.reset_feedback();
+                log_debug(&format!(
+                    "App: auto-advanced to learning group {} of {} with {} question(s)",
+                    next_index + 1,
+                    total_groups,
+                    next_quiz_len
+                ));
+                self.ensure_indices();
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn move_to_previous_group_with_quiz(&mut self) -> bool {
+        let Some(total_groups) = self.total_groups() else {
+            return false;
+        };
+
+        for offset in 1..=total_groups {
+            let prev_index = (self.app.learning_group_index + total_groups - offset) % total_groups;
+            if let Some(prev_quiz_len) = self.group_quiz_len(prev_index) {
+                self.app.learning_group_index = prev_index;
+                self.app.learning_quiz_index = prev_quiz_len - 1;
+                self.app.learning_option_index = 0;
+                self.reset_feedback();
+                log_debug(&format!(
+                    "App: auto-rewound to learning group {} of {} with {} question(s)",
+                    prev_index + 1,
+                    total_groups,
+                    prev_quiz_len
+                ));
+                self.ensure_indices();
+                return true;
+            }
+        }
+
+        false
+    }
+
     fn reset_question_state(&mut self) {
         self.app.learning_quiz_index = 0;
         self.app.learning_option_index = 0;
@@ -330,11 +400,136 @@ impl<'a> LearningManager<'a> {
         Self::reset_feedback_state(self.app);
     }
 
-    pub(crate) fn reset_feedback_state(app: &mut App) {
+pub(crate) fn reset_feedback_state(app: &mut App) {
         reset_learning_feedback(
             &mut app.learning_feedback,
             &mut app.learning_summary_revealed,
             &mut app.learning_waiting_for_next,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AppConfig, ConfigForm, OpenAiModelKind};
+    use serde_json::from_str;
+    use std::{fs, path::{Path, PathBuf}};
+
+    fn load_learning_response(filename: &str) -> StructuredLearningResponse {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(filename);
+        let contents = fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {}", path.display(), err));
+        from_str(&contents)
+            .unwrap_or_else(|err| panic!("failed to parse {} as StructuredLearningResponse: {}", path.display(), err))
+    }
+
+    fn app_with_response(response: StructuredLearningResponse) -> App {
+        App {
+            running: false,
+            view: AppView::Menu,
+            menu_index: 0,
+            events: Vec::new(),
+            selected_event: None,
+            session_dir: PathBuf::new(),
+            session_date: String::new(),
+            session_source: String::new(),
+            latest_file: None,
+            summary_file: None,
+            summary_content: None,
+            error: None,
+            ai_manager: None,
+            ai_status: None,
+            ai_loading: false,
+            ai_loading_frame: 0,
+            ai_result_receiver: None,
+            learning_response: Some(response),
+            learning_group_index: 0,
+            learning_quiz_index: 0,
+            learning_option_index: 0,
+            learning_feedback: None,
+            learning_summary_revealed: false,
+            learning_waiting_for_next: false,
+            config_form: ConfigForm::from_config(AppConfig::default()),
+            write_output_artifacts: false,
+            openai_model: OpenAiModelKind::Gpt5Mini,
+        }
+    }
+
+    #[test]
+    fn multiple_group_quiz_advances_and_wraps_groups() {
+        let response = load_learning_response("test_artifacts/multiple_knowledge_type_groups.json");
+        let mut app = app_with_response(response);
+
+        LearningManager::show_learning(&mut app);
+
+        assert_eq!(app.view, AppView::Learning);
+        assert_eq!(app.learning_group_index, 0);
+        assert_eq!(app.learning_quiz_index, 0);
+        assert_eq!(app.learning_option_index, 0);
+        assert!(!app.learning_summary_revealed);
+
+        {
+            let mut manager = LearningManager::new(&mut app);
+            manager.next_question();
+        }
+
+        assert_eq!(app.learning_group_index, 1, "expected to advance to next knowledge group");
+        assert_eq!(app.learning_quiz_index, 0, "first quiz question should be active after advancing groups");
+        assert_eq!(app.learning_option_index, 0);
+
+        let total_groups = app
+            .learning_response
+            .as_ref()
+            .map(|resp| resp.response.len())
+            .unwrap_or_default();
+        assert!(total_groups > 1, "fixture should include multiple knowledge groups");
+
+        app.learning_group_index = total_groups - 1;
+        app.learning_quiz_index = 0;
+
+        {
+            let mut manager = LearningManager::new(&mut app);
+            manager.next_question();
+        }
+
+        assert_eq!(app.learning_group_index, 0, "navigation should wrap back to the first group");
+        assert_eq!(app.learning_quiz_index, 0);
+        assert_eq!(app.learning_option_index, 0);
+        assert!(!app.learning_summary_revealed);
+        assert!(!app.learning_waiting_for_next);
+    }
+
+    #[test]
+    fn single_group_quiz_cycles_questions_without_group_change() {
+        let response = load_learning_response("test_artifacts/single_knowledge_type_group.json");
+        let mut app = app_with_response(response);
+
+        LearningManager::show_learning(&mut app);
+
+        let total_questions = app
+            .learning_response
+            .as_ref()
+            .and_then(|resp| resp.response.first())
+            .map(|group| group.quiz.len())
+            .unwrap_or_default();
+        assert!(total_questions > 1, "fixture should provide multiple quiz questions");
+
+        app.learning_group_index = 0;
+        app.learning_quiz_index = total_questions - 1;
+        app.learning_option_index = 2;
+        app.learning_summary_revealed = true;
+        app.learning_waiting_for_next = true;
+
+        {
+            let mut manager = LearningManager::new(&mut app);
+            manager.next_question();
+        }
+
+        assert_eq!(app.learning_group_index, 0, "single group quiz should remain on the same group");
+        assert_eq!(app.learning_quiz_index, 0, "question index should cycle back to the beginning");
+        assert_eq!(app.learning_option_index, 0, "option index should reset when cycling questions");
+        assert!(!app.learning_summary_revealed, "cycling should clear summary state");
+        assert!(!app.learning_waiting_for_next, "cycling should clear waiting state");
     }
 }
