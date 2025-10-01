@@ -6,7 +6,7 @@ use crate::{
     reset_learning_feedback,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use rand::{rng, seq::SliceRandom};
+use rand::{seq::SliceRandom, rng};
 
 pub(crate) struct LearningManager<'a> {
     app: &'a mut App,
