@@ -17,7 +17,7 @@
 ### Via npm (Recommended)
 
 ```bash
-npm install -g learnchain-cli
+npm install -g learnchain
 npx learnchain --help
 ```
 

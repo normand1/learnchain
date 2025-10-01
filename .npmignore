@@ -1,0 +1,25 @@
+# Development files
+.git
+.github
+*.log
+.DS_Store
+.env
+
+# Rust build artifacts
+target/
+debug/
+**/*.rs.bk
+*.pdb
+mutants.out*/
+
+# Test artifacts
+test_artifacts/
+test_fixtures/
+output/
+
+# Config files (users generate their own)
+config/app_config.toml
+
+# Keep these out of npm package
+.idea/
+.vscode/
