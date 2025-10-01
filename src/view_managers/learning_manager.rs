@@ -6,7 +6,7 @@ use crate::{
     reset_learning_feedback,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use rand::{seq::SliceRandom, thread_rng};
+use rand::{seq::SliceRandom, rng};
 
 pub(crate) struct LearningManager<'a> {
     app: &'a mut App,
@@ -35,7 +35,7 @@ impl<'a> LearningManager<'a> {
     }
 
     pub(crate) fn shuffle_quiz_options(response: &mut StructuredLearningResponse) {
-        let mut rng = thread_rng();
+        let mut rng = rng();
         for group in &mut response.response {
             for quiz in &mut group.quiz {
                 quiz.options.shuffle(&mut rng);
