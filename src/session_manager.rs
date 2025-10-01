@@ -827,7 +827,7 @@ mod tests {
 
     #[test]
     fn parse_codex_fixture_extracts_function_events() {
-        let path = fixture_path("test_artifacts/codex_events_sample.jsonl");
+        let path = fixture_path("test_fixtures/codex_events_sample.jsonl");
         let (events, error) = parse_codex_session_file(&path);
 
         assert!(error.is_none(), "unexpected parse error: {:?}", error);
@@ -850,7 +850,7 @@ mod tests {
 
     #[test]
     fn parse_claude_fixture_extracts_tool_use_entries() {
-        let path = fixture_path("test_artifacts/claude_code_events_sample.jsonl");
+        let path = fixture_path("test_fixtures/claude_code_events_sample.jsonl");
         let (events, error) = parse_claude_session_file(&path);
 
         assert!(
