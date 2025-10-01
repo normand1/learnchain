@@ -1,3 +1,4 @@
+use crate::config::SessionSourceKind;
 use chrono::{DateTime, Local};
 use serde::Deserialize;
 use serde_json::Value;
@@ -120,6 +121,14 @@ impl SessionManager {
         Self::builder().with_codex_cli_source().build()
     }
 
+    pub fn from_source(source: SessionSourceKind) -> Self {
+        let builder = match source {
+            SessionSourceKind::Codex => SessionManager::builder().with_codex_cli_source(),
+            SessionSourceKind::ClaudeCode => SessionManager::builder().with_claude_code_source(),
+        };
+        builder.build()
+    }
+
     #[allow(dead_code)]
     pub fn with_root<P: Into<PathBuf>>(root: P) -> Self {
         Self::builder().with_codex_cli_root(root).build()
@@ -188,6 +197,11 @@ impl SessionManagerBuilder {
         self
     }
 
+    pub fn with_claude_code_source(mut self) -> Self {
+        self.sources.push(Box::new(ClaudeCodeSource::default()));
+        self
+    }
+
     #[allow(dead_code)]
     pub fn with_codex_cli_root<P: Into<PathBuf>>(mut self, root: P) -> Self {
         self.sources
@@ -224,6 +238,32 @@ impl CodexCliSource {
 }
 
 impl SessionSource for CodexCliSource {
+    fn load(&self, now: DateTime<Local>) -> SessionLoad {
+        let (latest_file, traversal_error) = self.find_latest_recursively(&self.root_dir);
+        let mut session_dir = self.root_dir.clone();
+        let mut session_date = now.format("%Y-%m-%d").to_string();
+
+        let (events, parse_error) = match latest_file.as_ref() {
+            Some(path) => {
+                if let Some(parent) = path.parent() {
+                    session_dir = parent.to_path_buf();
+                }
+                session_date = derive_codex_session_date(path).unwrap_or(session_date);
+                parse_codex_session_file(path)
+            }
+            None => (Vec::new(), None),
+        };
+
+        SessionLoad {
+            source: self.label.clone(),
+            session_date,
+            session_dir,
+            latest_file,
+            events,
+            error: merge_errors(traversal_error, parse_error),
+        }
+    }
+
     fn label(&self) -> &str {
         &self.label
     }
@@ -294,12 +334,180 @@ impl SessionSource for CodexCliSource {
     }
 }
 
+impl CodexCliSource {
+    fn find_latest_recursively(&self, root: &Path) -> (Option<PathBuf>, Option<String>) {
+        let mut entry_error: Option<String> = None;
+        let mut latest: Option<(SystemTime, PathBuf)> = None;
+        let mut stack = vec![root.to_path_buf()];
+
+        while let Some(dir) = stack.pop() {
+            match fs::read_dir(&dir) {
+                Ok(entries) => {
+                    for entry in entries {
+                        match entry {
+                            Ok(entry) => match entry.metadata() {
+                                Ok(metadata) => {
+                                    let path = entry.path();
+                                    if metadata.is_dir() {
+                                        stack.push(path);
+                                        continue;
+                                    }
+                                    if !is_codex_session_log_file(&path, &metadata) {
+                                        continue;
+                                    }
+                                    let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+                                    let replace = latest
+                                        .as_ref()
+                                        .map(|(time, _)| modified > *time)
+                                        .unwrap_or(true);
+                                    if replace {
+                                        latest = Some((modified, path));
+                                    }
+                                }
+                                Err(err) => {
+                                    append_error(
+                                        &mut entry_error,
+                                        format!(
+                                            "{} ({}): {}",
+                                            dir.display(),
+                                            entry.file_name().to_string_lossy(),
+                                            err
+                                        ),
+                                    );
+                                }
+                            },
+                            Err(err) => {
+                                append_error(
+                                    &mut entry_error,
+                                    format!("{}: {}", dir.display(), err),
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    append_error(&mut entry_error, format!("{}: {}", dir.display(), err));
+                }
+            }
+        }
+
+        (latest.map(|(_, path)| path), entry_error)
+    }
+}
+
+struct ClaudeCodeSource {
+    label: String,
+    root_dir: PathBuf,
+}
+
+impl ClaudeCodeSource {
+    fn default() -> Self {
+        Self::with_root(default_claude_projects_root())
+    }
+
+    fn with_root(root_dir: PathBuf) -> Self {
+        Self {
+            label: "Claude Code".to_string(),
+            root_dir,
+        }
+    }
+
+    fn find_latest_recursively(&self, root: &Path) -> (Option<PathBuf>, Option<String>) {
+        let mut entry_error: Option<String> = None;
+        let mut latest: Option<(SystemTime, PathBuf)> = None;
+        let mut stack = vec![root.to_path_buf()];
+
+        while let Some(dir) = stack.pop() {
+            match fs::read_dir(&dir) {
+                Ok(entries) => {
+                    for entry in entries {
+                        match entry {
+                            Ok(entry) => match entry.metadata() {
+                                Ok(metadata) => {
+                                    let path = entry.path();
+                                    if metadata.is_dir() {
+                                        stack.push(path);
+                                        continue;
+                                    }
+                                    if !is_claude_session_log_file(&path, &metadata) {
+                                        continue;
+                                    }
+                                    let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+                                    let replace = latest
+                                        .as_ref()
+                                        .map(|(time, _)| modified > *time)
+                                        .unwrap_or(true);
+                                    if replace {
+                                        latest = Some((modified, path));
+                                    }
+                                }
+                                Err(err) => {
+                                    append_error(
+                                        &mut entry_error,
+                                        format!(
+                                            "{} ({}): {}",
+                                            dir.display(),
+                                            entry.file_name().to_string_lossy(),
+                                            err
+                                        ),
+                                    );
+                                }
+                            },
+                            Err(err) => {
+                                append_error(
+                                    &mut entry_error,
+                                    format!("{}: {}", dir.display(), err),
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    append_error(&mut entry_error, format!("{}: {}", dir.display(), err));
+                }
+            }
+        }
+
+        (latest.map(|(_, path)| path), entry_error)
+    }
+}
+
+impl SessionSource for ClaudeCodeSource {
+    fn label(&self) -> &str {
+        &self.label
+    }
+
+    fn session_dir(&self, _now: DateTime<Local>) -> PathBuf {
+        self.root_dir.clone()
+    }
+
+    fn find_latest_file(&self, session_dir: &Path) -> (Option<PathBuf>, Option<String>) {
+        if !session_dir.exists() {
+            let message = format!("{}: directory not found", session_dir.display());
+            return (None, Some(message));
+        }
+        self.find_latest_recursively(session_dir)
+    }
+
+    fn parse_events(&self, path: &Path) -> (Vec<SessionEvent>, Option<String>) {
+        parse_claude_session_file(path)
+    }
+}
+
 fn default_session_root() -> PathBuf {
     env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("~"))
         .join(".codex")
         .join("sessions")
+}
+
+fn default_claude_projects_root() -> PathBuf {
+    env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("~"))
+        .join(".claude")
+        .join("projects")
 }
 
 fn merge_errors(a: Option<String>, b: Option<String>) -> Option<String> {
@@ -410,6 +618,138 @@ fn is_codex_session_log_file(path: &Path, metadata: &Metadata) -> bool {
     )
 }
 
+fn derive_codex_session_date(path: &Path) -> Option<String> {
+    let day = path.parent()?.file_name()?.to_str()?.to_string();
+    let month = path.parent()?.parent()?.file_name()?.to_str()?.to_string();
+    let year = path
+        .parent()?
+        .parent()?
+        .parent()?
+        .file_name()?
+        .to_str()?
+        .to_string();
+
+    if year.len() == 4 && month.len() == 2 && day.len() == 2 {
+        return Some(format!("{}-{}-{}", year, month, day));
+    }
+
+    file_modified_date(path)
+}
+
+fn file_modified_date(path: &Path) -> Option<String> {
+    let metadata = path.metadata().ok()?;
+    let modified = metadata.modified().ok()?;
+    let datetime: DateTime<Local> = DateTime::<Local>::from(modified);
+    Some(datetime.format("%Y-%m-%d").to_string())
+}
+
+fn parse_claude_session_file(path: &Path) -> (Vec<SessionEvent>, Option<String>) {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) => return (Vec::new(), Some(format!("{}: {}", path.display(), err))),
+    };
+
+    let reader = BufReader::new(file);
+    let mut events = Vec::new();
+    let mut issues: Vec<String> = Vec::new();
+
+    for (idx, line) in reader.lines().enumerate() {
+        let content = match line {
+            Ok(line) => line,
+            Err(err) => {
+                return (
+                    events,
+                    Some(format!("{} (line {}): {}", path.display(), idx + 1, err)),
+                );
+            }
+        };
+
+        if content.trim().is_empty() {
+            continue;
+        }
+
+        match serde_json::from_str::<ClaudeRawEvent>(&content) {
+            Ok(raw) => {
+                let timestamp = raw.timestamp.unwrap_or_else(|| "<unknown>".to_string());
+                let cwd = raw.cwd;
+                let session_id = raw.session_id;
+                let git_branch = raw.git_branch;
+                if let Some(message) = raw.message {
+                    let base_call_id = message.id.clone();
+                    let model = message.model.clone();
+                    let role = message.role.clone();
+                    if let Some(contents) = message.content {
+                        for content in contents {
+                            if !content.is_relevant() {
+                                continue;
+                            }
+                            let payload_type = content.payload_label();
+                            let call_id = content.id.clone().or_else(|| base_call_id.clone());
+                            let arguments = content.input.clone().map(SessionEvent::format_value);
+                            let mut content_texts = Vec::new();
+                            if let Some(name) = content.name.as_deref() {
+                                content_texts.push(format!("tool: {}", name));
+                            }
+                            if let Some(text) = content
+                                .text
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                            {
+                                content_texts.push(text.to_string());
+                            }
+                            if let Some(role) = role.as_deref() {
+                                content_texts.push(format!("role: {}", role));
+                            }
+                            if let Some(ref cwd_value) = cwd {
+                                content_texts.push(format!("cwd: {}", cwd_value));
+                            }
+                            if let Some(ref branch) = git_branch {
+                                content_texts.push(format!("branch: {}", branch));
+                            }
+                            if let Some(ref session) = session_id {
+                                content_texts.push(format!("session: {}", session));
+                            }
+                            if let Some(model) = model.as_deref() {
+                                content_texts.push(format!("model: {}", model));
+                            }
+
+                            events.push(SessionEvent {
+                                timestamp: timestamp.clone(),
+                                payload_type,
+                                call_id,
+                                arguments,
+                                output: None,
+                                content_texts,
+                            });
+                        }
+                    }
+                }
+            }
+            Err(err) => issues.push(format!("{}:#{}: {}", path.display(), idx + 1, err)),
+        }
+    }
+
+    let error = if issues.is_empty() {
+        None
+    } else {
+        Some(issues.join(" | "))
+    };
+
+    (events, error)
+}
+
+fn is_claude_session_log_file(path: &Path, metadata: &Metadata) -> bool {
+    if !metadata.is_file() {
+        return false;
+    }
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some(ext) if ext.eq_ignore_ascii_case("jsonl")
+            || ext.eq_ignore_ascii_case("json")
+    )
+}
+
 #[derive(Debug, Deserialize)]
 struct RawEvent {
     timestamp: Option<String>,
@@ -431,4 +771,119 @@ struct RawPayload {
 #[derive(Debug, Deserialize)]
 struct ContentFragment {
     text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeRawEvent {
+    timestamp: Option<String>,
+    cwd: Option<String>,
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+    #[serde(rename = "gitBranch")]
+    git_branch: Option<String>,
+    message: Option<ClaudeMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeMessage {
+    id: Option<String>,
+    role: Option<String>,
+    model: Option<String>,
+    content: Option<Vec<ClaudeContent>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeContent {
+    #[serde(rename = "type")]
+    content_type: Option<String>,
+    id: Option<String>,
+    name: Option<String>,
+    text: Option<String>,
+    input: Option<Value>,
+}
+
+impl ClaudeContent {
+    fn is_relevant(&self) -> bool {
+        matches!(self.content_type.as_deref(), Some("tool_use"))
+    }
+
+    fn payload_label(&self) -> String {
+        match (self.content_type.as_deref(), self.name.as_deref()) {
+            (Some(content_type), Some(name)) => format!("{}: {}", content_type, name),
+            (Some(content_type), None) => content_type.to_string(),
+            _ => "tool_use".to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn fixture_path(relative: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
+    }
+
+    #[test]
+    fn parse_codex_fixture_extracts_function_events() {
+        let path = fixture_path("test_artifacts/codex_events_sample.jsonl");
+        let (events, error) = parse_codex_session_file(&path);
+
+        assert!(error.is_none(), "unexpected parse error: {:?}", error);
+        assert_eq!(events.len(), 12, "expected function call entries");
+
+        let first = &events[0];
+        assert_eq!(first.payload_type, "function_call");
+        assert_eq!(first.call_id.as_deref(), Some("call_o6cPedcTIBUW6VtobSubFUQS"));
+        let arguments = first.arguments.as_deref().expect("function call should include arguments");
+        assert!(arguments.contains("\"command\""));
+        assert!(arguments.contains("\"ls\""));
+
+        let second = &events[1];
+        assert_eq!(second.payload_type, "function_call_output");
+        assert_eq!(second.call_id.as_deref(), Some("call_o6cPedcTIBUW6VtobSubFUQS"));
+        let output = second.output.as_deref().expect("output should be present");
+        assert!(output.contains("AGENTS.md"));
+        assert!(output.contains("Cargo.toml"));
+    }
+
+    #[test]
+    fn parse_claude_fixture_extracts_tool_use_entries() {
+        let path = fixture_path("test_artifacts/claude_code_events_sample.jsonl");
+        let (events, error) = parse_claude_session_file(&path);
+
+        assert!(
+            matches!(error.as_ref(), Some(message) if message.contains("invalid type")),
+            "expected schema mismatch warning containing 'invalid type', got {:?}",
+            error
+        );
+        assert_eq!(events.len(), 3, "expected tool_use items only");
+
+        let first = &events[0];
+        assert_eq!(first.payload_type, "tool_use: LS");
+        assert_eq!(first.call_id.as_deref(), Some("toolu_01QDbFXvHxuhvTaNYopFubX2"));
+        let args = first
+            .arguments
+            .as_deref()
+            .expect("tool use should include arguments");
+        assert!(args.contains("\"path\""));
+        assert!(args.contains("learnchain"));
+        assert!(first.content_texts.iter().any(|line| line.contains("tool: LS")));
+        assert!(first
+            .content_texts
+            .iter()
+            .any(|line| line.contains("session: 5d33cbd0-0d2f-4085-876f-40361797613e")));
+        assert!(first
+            .content_texts
+            .iter()
+            .any(|line| line.contains("model: claude-sonnet-4-20250514")));
+
+        let last = events.last().expect("expected at least one event");
+        assert!(last.payload_type.starts_with("tool_use: Read"));
+        assert!(last
+            .content_texts
+            .iter()
+            .any(|line| line.contains("tool: Read")));
+    }
 }

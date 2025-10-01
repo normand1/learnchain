@@ -17,10 +17,10 @@ use ratatui::{DefaultTerminal, Frame};
 use session_manager::{SessionEvent, SessionLoad, SessionManager};
 use std::{path::PathBuf, sync::mpsc::Receiver, time::Duration};
 use ui_renderer::UiRenderer;
-use view_managers::{ConfigManager, LearningManager, MenuManager, menu_manager::MENU_OPTIONS};
+use view_managers::{ConfigManager, LearningManager, MenuManager};
 
-const DEFAULT_OPENAI_MODEL: &str = "gpt-5-mini";
 pub(crate) const AI_LOADING_FRAMES: [&str; 4] = ["-", "\\", "|", "/"];
+pub(crate) const OPENAI_KEY_HELP: &str = "OpenAI API key not configured. Open the Config view (select \"OpenAI API key\" and press Enter) or run `learnchain --set-openai-key <your-key>` to add it.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AppView {
@@ -47,6 +47,44 @@ pub(crate) fn reset_learning_feedback(
 }
 
 fn main() -> color_eyre::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "--set-openai-key" => {
+                if let Some(key) = args.get(2) {
+                    config::update(|cfg| cfg.openai_api_key = key.trim().to_string())?;
+                    println!("Stored OpenAI API key in config/app_config.toml.");
+                    return Ok(());
+                } else {
+                    eprintln!("Usage: learnchain --set-openai-key <key>");
+                    std::process::exit(1);
+                }
+            }
+            "--clear-openai-key" => {
+                config::update(|cfg| cfg.openai_api_key.clear())?;
+                println!("Cleared OpenAI API key from config/app_config.toml.");
+                return Ok(());
+            }
+            "--help" | "-h" => {
+                println!(
+                    "learnchain options:\n  --set-openai-key <key>    store your OpenAI API key in the app config\n  --clear-openai-key       remove the stored OpenAI API key\n  --help                   show this message\n  --version                show version"
+                );
+                return Ok(());
+            }
+            "--version" | "-V" => {
+                println!("learnchain {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            _ => {
+                eprintln!(
+                    "Unrecognized option '{}'. Run `learnchain --help` for usage.",
+                    args[1]
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
     dotenv().ok();
     color_eyre::install()?;
     let terminal = ratatui::init();
@@ -72,10 +110,14 @@ pub struct App {
     pub(crate) session_dir: PathBuf,
     /// Human-readable label for today's date.
     pub(crate) session_date: String,
+    /// Label describing the active session source.
+    pub(crate) session_source: String,
     /// Most recent session file for today, if any.
     pub(crate) latest_file: Option<PathBuf>,
     /// Absolute path to the aggregated markdown summary, if generated.
     pub(crate) summary_file: Option<PathBuf>,
+    /// Markdown summary content cached in memory.
+    pub(crate) summary_content: Option<String>,
     /// Any error encountered while loading files or parsing events.
     pub(crate) error: Option<String>,
     /// Lazily configured OpenAI integration.
@@ -104,6 +146,10 @@ pub struct App {
     pub(crate) learning_waiting_for_next: bool,
     /// Holds the editable configuration state when rendering the config view.
     pub(crate) config_form: ConfigForm,
+    /// Whether artifacts should be written to disk.
+    pub(crate) write_output_artifacts: bool,
+    /// Currently selected OpenAI model.
+    pub(crate) openai_model: config::OpenAiModelKind,
 }
 
 impl App {
@@ -118,43 +164,39 @@ impl App {
             );
         }
 
-        let manager = SessionManager::new();
-        let SessionLoad {
-            session_date,
-            session_dir,
-            latest_file,
-            events,
-            error: session_error,
-            ..
-        } = manager.load_today_events();
-        let output_manager = OutputManager::new();
-        let (summary_file, summary_error) =
-            output_manager.write_markdown_summary(&events, &session_date, latest_file.as_deref());
-        let selected_event = if events.is_empty() { None } else { Some(0) };
-        if let Some(error) = session_error {
-            Self::push_error(&mut aggregated_error, error);
-        }
-        if let Some(summary_error) = summary_error {
-            Self::push_error(&mut aggregated_error, summary_error);
-        }
-        let ai_manager = match AiManager::from_env("output", DEFAULT_OPENAI_MODEL) {
-            Ok(manager) => Some(manager),
-            Err(err) => {
-                Self::push_error(&mut aggregated_error, format!("AI unavailable: {}", err));
-                None
+        let config_snapshot = config::current();
+        let write_output_artifacts = config_snapshot.write_output_artifacts;
+        let openai_model = config_snapshot.openai_model;
+        let session_manager = SessionManager::from_source(config_snapshot.session_source);
+        let session_load = session_manager.load_today_events();
+
+        let openai_key = config_snapshot.openai_api_key.clone();
+        let ai_manager = if openai_key.trim().is_empty() {
+            None
+        } else {
+            match AiManager::from_config("output", openai_model.as_model_name(), openai_key.clone())
+            {
+                Ok(manager) => Some(manager),
+                Err(err) => {
+                    Self::push_error(&mut aggregated_error, format!("AI unavailable: {}", err));
+                    None
+                }
             }
         };
-        Self {
+
+        let mut app = Self {
             running: false,
             view: AppView::Menu,
             menu_index: 0,
-            events,
-            selected_event,
-            session_dir,
-            session_date,
-            latest_file,
-            summary_file,
-            error: aggregated_error,
+            events: Vec::new(),
+            selected_event: None,
+            session_dir: PathBuf::new(),
+            session_date: String::new(),
+            session_source: String::new(),
+            latest_file: None,
+            summary_file: None,
+            summary_content: None,
+            error: None,
             ai_manager,
             ai_status: None,
             ai_loading: false,
@@ -167,8 +209,24 @@ impl App {
             learning_feedback: None,
             learning_summary_revealed: false,
             learning_waiting_for_next: false,
-            config_form: ConfigForm::from_config(config::current()),
+            config_form: ConfigForm::from_config(config_snapshot.clone()),
+            write_output_artifacts,
+            openai_model,
+        };
+
+        app.apply_session_load(session_load);
+
+        if app.ai_manager.is_none() && openai_key.trim().is_empty() {
+            app.ai_status = Some(OPENAI_KEY_HELP.to_string());
+        } else {
+            app.ai_status = None;
         }
+
+        if let Some(error) = aggregated_error {
+            Self::push_error(&mut app.error, error);
+        }
+
+        app
     }
 
     /// Run the application's main loop.
@@ -186,6 +244,52 @@ impl App {
     /// Dispatch rendering based on the active view.
     fn render(&mut self, frame: &mut Frame) {
         UiRenderer::new(self).render(frame);
+    }
+
+    fn apply_session_load(&mut self, load: SessionLoad) {
+        self.session_source = load.source;
+        self.session_date = load.session_date;
+        self.session_dir = load.session_dir;
+        self.latest_file = load.latest_file;
+        self.events = load.events;
+        self.selected_event = if self.events.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        self.error = load.error;
+
+        let output_manager = OutputManager::new();
+        let artifact = output_manager.write_markdown_summary(
+            &self.events,
+            &self.session_date,
+            self.latest_file.as_deref(),
+            self.write_output_artifacts,
+        );
+        self.summary_file = artifact.path;
+        self.summary_content = Some(artifact.content);
+        if let Some(summary_error) = artifact.error {
+            Self::push_error(&mut self.error, summary_error);
+        }
+    }
+
+    pub(crate) fn reload_session_from_config(&mut self) {
+        let config_snapshot = config::current();
+        self.write_output_artifacts = config_snapshot.write_output_artifacts;
+        self.openai_model = config_snapshot.openai_model;
+        if config_snapshot.openai_api_key.trim().is_empty() {
+            self.ai_manager = None;
+            App::push_error(&mut self.error, OPENAI_KEY_HELP.to_string());
+            self.ai_status = Some(OPENAI_KEY_HELP.to_string());
+        } else {
+            let key = config_snapshot.openai_api_key.clone();
+            self.ai_manager =
+                AiManager::from_config("output", self.openai_model.as_model_name(), key).ok();
+            self.ai_status = None;
+        }
+        let manager = SessionManager::from_source(config_snapshot.session_source);
+        let load = manager.load_today_events();
+        self.apply_session_load(load);
     }
 
     /// Reads the crossterm events and updates the state of [`App`].

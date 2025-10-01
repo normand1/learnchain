@@ -1,0 +1,32 @@
+{
+  "name": "learnchain-cli",
+  "version": "0.1.0",
+  "description": "Learns from Codex or Claude session logs and surfaces quizzes in the terminal UI.",
+  "license": "MIT",
+  "bin": {
+    "learnchain": "dist/learnchain.js"
+  },
+  "scripts": {
+    "build": "cargo build --release",
+    "postinstall": "node scripts/install.js"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "scripts/install.js",
+    "Cargo.toml",
+    "Cargo.lock",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "learnchain",
+    "tui",
+    "codex",
+    "cli"
+  ],
+  "engines": {
+    "node": ">=16"
+  }
+}

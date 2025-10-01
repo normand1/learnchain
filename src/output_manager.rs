@@ -9,6 +9,13 @@ pub struct OutputManager {
     root: PathBuf,
 }
 
+#[derive(Debug)]
+pub struct SummaryArtifact {
+    pub path: Option<PathBuf>,
+    pub content: String,
+    pub error: Option<String>,
+}
+
 impl Default for OutputManager {
     fn default() -> Self {
         Self::with_root("output")
@@ -29,24 +36,33 @@ impl OutputManager {
         events: &[SessionEvent],
         session_date: &str,
         latest_file: Option<&Path>,
-    ) -> (Option<PathBuf>, Option<String>) {
-        let output_dir = match self.output_directory() {
-            Ok(dir) => dir,
-            Err(err) => return (None, Some(err)),
-        };
+        persist: bool,
+    ) -> SummaryArtifact {
+        let mut error: Option<String> = None;
+        let mut target_path: Option<PathBuf> = None;
 
-        if let Err(err) = fs::create_dir_all(&output_dir) {
-            return (None, Some(format!("{}: {}", output_dir.display(), err)));
+        if persist {
+            match self.output_directory() {
+                Ok(dir) => {
+                    if let Err(err) = fs::create_dir_all(&dir) {
+                        error = Some(format!("{}: {}", dir.display(), err));
+                    } else {
+                        let filename = latest_file
+                            .and_then(|path| path.file_stem())
+                            .and_then(|stem| stem.to_str())
+                            .map(|stem| format!("{stem}.md"))
+                            .unwrap_or_else(|| format!("session-{}.md", session_date));
+
+                        let mut candidate = dir;
+                        candidate.push(filename);
+                        target_path = Some(candidate);
+                    }
+                }
+                Err(err) => {
+                    error = Some(err);
+                }
+            }
         }
-
-        let filename = latest_file
-            .and_then(|path| path.file_stem())
-            .and_then(|stem| stem.to_str())
-            .map(|stem| format!("{stem}.md"))
-            .unwrap_or_else(|| format!("session-{}.md", session_date));
-
-        let mut output_path = output_dir;
-        output_path.push(filename);
 
         let mut document = format!("# Session Output - {}\n\n", session_date);
         let mut had_content = false;
@@ -99,11 +115,23 @@ impl OutputManager {
             ));
         }
 
-        if let Err(err) = fs::write(&output_path, document) {
-            return (None, Some(format!("{}: {}", output_path.display(), err)));
+        let mut written_path = None;
+        if let Some(path) = target_path {
+            match fs::write(&path, &document) {
+                Ok(_) => {
+                    written_path = Some(path);
+                }
+                Err(err) => {
+                    error = Some(format!("{}: {}", path.display(), err));
+                }
+            }
         }
 
-        (Some(output_path), None)
+        SummaryArtifact {
+            path: written_path,
+            content: document,
+            error,
+        }
     }
 
     pub fn output_directory(&self) -> Result<PathBuf, String> {

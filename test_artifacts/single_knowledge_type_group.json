@@ -1,0 +1,186 @@
+{
+  "response": [
+    {
+      "knowledge_type_group": "Option handling and pattern matching (let-else, as_ref, ?)",
+      "summary": "Common Rust patterns for safely handling optional data and control flow: let-else pattern matching on Option, borrowing an Option with as_ref, early exit with ?, using Vec::get to avoid panics, inclusive ranges, and modulo arithmetic for circular index calculations.",
+      "quiz": [
+        {
+          "question": "In Rust, what does the construct `let Some(x) = expr else { ... };` do when `expr` is an Option?",
+          "options": [
+            {
+              "selection": "It creates a new variable that always contains a Some variant.",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "It destructures only when the value is a Result, not an Option.",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "It's equivalent to if let and will panic if the pattern doesn't match.",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "It uses the let-else syntax: if the pattern matches the value is bound, otherwise the else block is executed.",
+              "is_correct_answer": true
+            }
+          ],
+          "resources": [
+            "https://doc.rust-lang.org/reference/expressions/let-expr.html (let-else)",
+            "https://doc.rust-lang.org/std/option/enum.Option.html"
+          ]
+        },
+        {
+          "question": "What does Option::as_ref() do when called on an Option<T> (or &Option<T>)?",
+          "options": [
+            {
+              "selection": "Converts Option<T> into Result<T, E>.",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "Converts Option<T> into Option<&T> (i.e., borrows the inner value instead of moving it).",
+              "is_correct_answer": true
+            },
+            {
+              "selection": "Maps the contained value using a closure.",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "Consumes the Option and returns the contained value or panics.",
+              "is_correct_answer": false
+            }
+          ],
+          "resources": [
+            "https://doc.rust-lang.org/std/option/enum.Option.html#method.as_ref",
+            "https://doc.rust-lang.org/book/ch06-02-match.html (borrowing patterns)"
+          ]
+        },
+        {
+          "question": "When used in a function that returns Option<T>, what effect does the `?` operator have on an Option value?",
+          "options": [
+            {
+              "selection": "It panics when the Option is None.",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "It converts an Option into a Result with a default error.",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "If the Option is None, it returns None immediately from the current function; otherwise it unwraps the Some value.",
+              "is_correct_answer": true
+            },
+            {
+              "selection": "It only works inside async functions.",
+              "is_correct_answer": false
+            }
+          ],
+          "resources": [
+            "https://doc.rust-lang.org/book/ch09-02-recoverable-errors-with-result.html (the ? operator)",
+            "https://doc.rust-lang.org/reference/expressions/try-expr.html"
+          ]
+        },
+        {
+          "question": "Given unsigned indices and a total group count, which expression correctly computes a previous index wrapped around (circularly) by an offset?",
+          "options": [
+            {
+              "selection": "current.checked_sub(offset).unwrap_or(0)",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "current.wrapping_sub(offset)",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "(current + total - offset) % total",
+              "is_correct_answer": true
+            },
+            {
+              "selection": "(current - offset) % total",
+              "is_correct_answer": false
+            }
+          ],
+          "resources": [
+            "https://doc.rust-lang.org/std/ops/trait.Rem.html (modulo semantics)",
+            "https://doc.rust-lang.org/book/ch03-02-data-types.html (integer arithmetic)"
+          ]
+        },
+        {
+          "question": "Does the Rust range `1..=total_groups` include the upper bound `total_groups`?",
+          "options": [
+            {
+              "selection": "The range `1..=total_groups` is exclusive and does not include total_groups.",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "`1..=total_groups` is the same as `1..total_groups` but with a step of 2.",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "The range `1..=total_groups` is inclusive: it includes total_groups.",
+              "is_correct_answer": true
+            },
+            {
+              "selection": "Rust does not support inclusive ranges.",
+              "is_correct_answer": false
+            }
+          ],
+          "resources": [
+            "https://doc.rust-lang.org/book/ch03-05-control-flow.html#loops",
+            "https://doc.rust-lang.org/std/ops/struct.RangeInclusive.html"
+          ]
+        },
+        {
+          "question": "What does Vec::get(index) return in Rust when accessing an element by index?",
+          "options": [
+            {
+              "selection": "Vec::get(index) returns an Option<&T>: Some(&value) if in bounds, otherwise None.",
+              "is_correct_answer": true
+            },
+            {
+              "selection": "Vec::get(index) panics on out-of-bounds access.",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "Vec::get(index) returns the value by moving it out of the Vec.",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "Vec::get(index) returns a Result<&T, &'static str>.",
+              "is_correct_answer": false
+            }
+          ],
+          "resources": [
+            "https://doc.rust-lang.org/std/vec/struct.Vec.html#method.get",
+            "https://doc.rust-lang.org/book/ch04-02-references-and-borrowing.html"
+          ]
+        },
+        {
+          "question": "Which approach from the code is idiomatic to iterate candidate offsets and stop when a suitable group is found?",
+          "options": [
+            {
+              "selection": "Use while true with index arithmetic but Rust has no for ranges.",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "Use a for loop over an inclusive range (e.g. for offset in 1..=total) and check conditionally; return or break when found.",
+              "is_correct_answer": true
+            },
+            {
+              "selection": "Use recursion because loops cannot return early in Rust.",
+              "is_correct_answer": false
+            },
+            {
+              "selection": "Use an iterator's fold to mutate outer indices without early exit.",
+              "is_correct_answer": false
+            }
+          ],
+          "resources": [
+            "https://doc.rust-lang.org/book/ch03-05-control-flow.html#loops",
+            "https://doc.rust-lang.org/std/iter/index.html"
+          ]
+        }
+      ],
+      "knowledge_type_language": "Rust"
+    }
+  ]
+}
