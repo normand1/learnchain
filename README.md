@@ -103,19 +103,6 @@ LearnChain stores configuration in `config/app_config.toml`. Key settings includ
 - Default session log paths
 - UI preferences
 
-**Security Note**: Never commit API keys to version control. The app manages configuration persistence automatically.
-
-## Publishing to npm
-
-```bash
-npm install            # Install JS tooling
-npm run build          # Compile release binary
-npm version patch      # Bump version
-npm publish            # Publish to registry
-```
-
-The `postinstall` script compiles the Rust binary for the target platform and sets up the CLI wrapper.
-
 ## Contributing
 
 Contributions are welcome! Please:
