@@ -1,0 +1,56 @@
+name: Publish to npm
+
+on:
+  workflow_dispatch:  # Manual trigger
+  release:
+    types: [published]  # Trigger when a release is published
+
+permissions:
+  contents: read  # Required to download release assets
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download release binaries
+        run: |
+          # Get the latest release tag
+          TAG=${GITHUB_REF#refs/tags/}
+          if [ -z "$TAG" ] || [ "$TAG" = "$GITHUB_REF" ]; then
+            TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
+          fi
+
+          echo "Downloading binaries from release: $TAG"
+
+          # Download all binaries from the release
+          mkdir -p dist
+          gh release download "$TAG" --pattern "learnchain-*" --dir dist/
+
+          # Verify binaries were downloaded
+          ls -lh dist/
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Generate launcher script
+        run: node scripts/generate-launcher.js
+
+      - name: Verify package contents
+        run: |
+          npm pack --dry-run
+          echo "Package size:"
+          du -sh .
+
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
