@@ -569,7 +569,10 @@ pub(crate) fn poll_ai_messages(app: &mut App) {
 mod tests {
     use super::*;
     use crate::config::{AppConfig, ConfigForm, OpenAiModelKind};
-    use std::{path::{Path, PathBuf}, sync::mpsc};
+    use std::{
+        path::{Path, PathBuf},
+        sync::mpsc,
+    };
 
     fn test_app() -> App {
         App {
@@ -638,7 +641,10 @@ mod tests {
                 }
             ]
         });
-        assert_eq!(extract_completion_text(&value), Some("direct string".to_string()));
+        assert_eq!(
+            extract_completion_text(&value),
+            Some("direct string".to_string())
+        );
 
         let array_value = json!({
             "choices": [
@@ -652,7 +658,10 @@ mod tests {
                 }
             ]
         });
-        assert_eq!(extract_completion_text(&array_value), Some("part onepart two".to_string()));
+        assert_eq!(
+            extract_completion_text(&array_value),
+            Some("part onepart two".to_string())
+        );
 
         let missing = json!({});
         assert!(extract_completion_text(&missing).is_none());
@@ -724,7 +733,9 @@ mod tests {
         app.ai_loading = true;
         let (sender, receiver) = mpsc::channel();
         app.ai_result_receiver = Some(receiver);
-        sender.send(AiTaskMessage::Success(sample_response())).unwrap();
+        sender
+            .send(AiTaskMessage::Success(sample_response()))
+            .unwrap();
 
         poll_ai_messages(&mut app);
 
