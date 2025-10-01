@@ -11,6 +11,10 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      PACKAGE_NAME: learnchain
 
     steps:
       - name: Checkout code
@@ -28,7 +32,7 @@ jobs:
 
           # Download all binaries from the release
           mkdir -p dist
-          gh release download "$TAG" --pattern "learnchain-*" --dir dist/
+          gh release download "$TAG" --pattern "${PACKAGE_NAME}-*" --dir dist/
 
           # Verify binaries were downloaded
           ls -lh dist/
@@ -46,11 +50,14 @@ jobs:
 
       - name: Verify package contents
         run: |
+          echo "Preparing npm package: ${PACKAGE_NAME}"
           npm pack --dry-run
           echo "Package size:"
           du -sh .
 
       - name: Publish to npm
-        run: npm publish --access public
+        run: |
+          echo "Publishing ${PACKAGE_NAME} to npm"
+          npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
