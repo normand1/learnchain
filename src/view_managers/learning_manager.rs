@@ -400,7 +400,7 @@ impl<'a> LearningManager<'a> {
         Self::reset_feedback_state(self.app);
     }
 
-pub(crate) fn reset_feedback_state(app: &mut App) {
+    pub(crate) fn reset_feedback_state(app: &mut App) {
         reset_learning_feedback(
             &mut app.learning_feedback,
             &mut app.learning_summary_revealed,
@@ -414,14 +414,22 @@ mod tests {
     use super::*;
     use crate::config::{AppConfig, ConfigForm, OpenAiModelKind};
     use serde_json::from_str;
-    use std::{fs, path::{Path, PathBuf}};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
     fn load_learning_response(filename: &str) -> StructuredLearningResponse {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(filename);
         let contents = fs::read_to_string(&path)
             .unwrap_or_else(|err| panic!("failed to read {}: {}", path.display(), err));
-        from_str(&contents)
-            .unwrap_or_else(|err| panic!("failed to parse {} as StructuredLearningResponse: {}", path.display(), err))
+        from_str(&contents).unwrap_or_else(|err| {
+            panic!(
+                "failed to parse {} as StructuredLearningResponse: {}",
+                path.display(),
+                err
+            )
+        })
     }
 
     fn app_with_response(response: StructuredLearningResponse) -> App {
@@ -474,8 +482,14 @@ mod tests {
             manager.next_question();
         }
 
-        assert_eq!(app.learning_group_index, 1, "expected to advance to next knowledge group");
-        assert_eq!(app.learning_quiz_index, 0, "first quiz question should be active after advancing groups");
+        assert_eq!(
+            app.learning_group_index, 1,
+            "expected to advance to next knowledge group"
+        );
+        assert_eq!(
+            app.learning_quiz_index, 0,
+            "first quiz question should be active after advancing groups"
+        );
         assert_eq!(app.learning_option_index, 0);
 
         let total_groups = app
@@ -483,7 +497,10 @@ mod tests {
             .as_ref()
             .map(|resp| resp.response.len())
             .unwrap_or_default();
-        assert!(total_groups > 1, "fixture should include multiple knowledge groups");
+        assert!(
+            total_groups > 1,
+            "fixture should include multiple knowledge groups"
+        );
 
         app.learning_group_index = total_groups - 1;
         app.learning_quiz_index = 0;
@@ -493,7 +510,10 @@ mod tests {
             manager.next_question();
         }
 
-        assert_eq!(app.learning_group_index, 0, "navigation should wrap back to the first group");
+        assert_eq!(
+            app.learning_group_index, 0,
+            "navigation should wrap back to the first group"
+        );
         assert_eq!(app.learning_quiz_index, 0);
         assert_eq!(app.learning_option_index, 0);
         assert!(!app.learning_summary_revealed);
@@ -513,7 +533,10 @@ mod tests {
             .and_then(|resp| resp.response.first())
             .map(|group| group.quiz.len())
             .unwrap_or_default();
-        assert!(total_questions > 1, "fixture should provide multiple quiz questions");
+        assert!(
+            total_questions > 1,
+            "fixture should provide multiple quiz questions"
+        );
 
         app.learning_group_index = 0;
         app.learning_quiz_index = total_questions - 1;
@@ -526,10 +549,25 @@ mod tests {
             manager.next_question();
         }
 
-        assert_eq!(app.learning_group_index, 0, "single group quiz should remain on the same group");
-        assert_eq!(app.learning_quiz_index, 0, "question index should cycle back to the beginning");
-        assert_eq!(app.learning_option_index, 0, "option index should reset when cycling questions");
-        assert!(!app.learning_summary_revealed, "cycling should clear summary state");
-        assert!(!app.learning_waiting_for_next, "cycling should clear waiting state");
+        assert_eq!(
+            app.learning_group_index, 0,
+            "single group quiz should remain on the same group"
+        );
+        assert_eq!(
+            app.learning_quiz_index, 0,
+            "question index should cycle back to the beginning"
+        );
+        assert_eq!(
+            app.learning_option_index, 0,
+            "option index should reset when cycling questions"
+        );
+        assert!(
+            !app.learning_summary_revealed,
+            "cycling should clear summary state"
+        );
+        assert!(
+            !app.learning_waiting_for_next,
+            "cycling should clear waiting state"
+        );
     }
 }
