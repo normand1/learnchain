@@ -835,14 +835,23 @@ mod tests {
 
         let first = &events[0];
         assert_eq!(first.payload_type, "function_call");
-        assert_eq!(first.call_id.as_deref(), Some("call_o6cPedcTIBUW6VtobSubFUQS"));
-        let arguments = first.arguments.as_deref().expect("function call should include arguments");
+        assert_eq!(
+            first.call_id.as_deref(),
+            Some("call_o6cPedcTIBUW6VtobSubFUQS")
+        );
+        let arguments = first
+            .arguments
+            .as_deref()
+            .expect("function call should include arguments");
         assert!(arguments.contains("\"command\""));
         assert!(arguments.contains("\"ls\""));
 
         let second = &events[1];
         assert_eq!(second.payload_type, "function_call_output");
-        assert_eq!(second.call_id.as_deref(), Some("call_o6cPedcTIBUW6VtobSubFUQS"));
+        assert_eq!(
+            second.call_id.as_deref(),
+            Some("call_o6cPedcTIBUW6VtobSubFUQS")
+        );
         let output = second.output.as_deref().expect("output should be present");
         assert!(output.contains("AGENTS.md"));
         assert!(output.contains("Cargo.toml"));
@@ -862,28 +871,41 @@ mod tests {
 
         let first = &events[0];
         assert_eq!(first.payload_type, "tool_use: LS");
-        assert_eq!(first.call_id.as_deref(), Some("toolu_01QDbFXvHxuhvTaNYopFubX2"));
+        assert_eq!(
+            first.call_id.as_deref(),
+            Some("toolu_01QDbFXvHxuhvTaNYopFubX2")
+        );
         let args = first
             .arguments
             .as_deref()
             .expect("tool use should include arguments");
         assert!(args.contains("\"path\""));
         assert!(args.contains("learnchain"));
-        assert!(first.content_texts.iter().any(|line| line.contains("tool: LS")));
-        assert!(first
-            .content_texts
-            .iter()
-            .any(|line| line.contains("session: 5d33cbd0-0d2f-4085-876f-40361797613e")));
-        assert!(first
-            .content_texts
-            .iter()
-            .any(|line| line.contains("model: claude-sonnet-4-20250514")));
+        assert!(
+            first
+                .content_texts
+                .iter()
+                .any(|line| line.contains("tool: LS"))
+        );
+        assert!(
+            first
+                .content_texts
+                .iter()
+                .any(|line| line.contains("session: 5d33cbd0-0d2f-4085-876f-40361797613e"))
+        );
+        assert!(
+            first
+                .content_texts
+                .iter()
+                .any(|line| line.contains("model: claude-sonnet-4-20250514"))
+        );
 
         let last = events.last().expect("expected at least one event");
         assert!(last.payload_type.starts_with("tool_use: Read"));
-        assert!(last
-            .content_texts
-            .iter()
-            .any(|line| line.contains("tool: Read")));
+        assert!(
+            last.content_texts
+                .iter()
+                .any(|line| line.contains("tool: Read"))
+        );
     }
 }
