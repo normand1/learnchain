@@ -5,6 +5,9 @@ on:
   release:
     types: [published]  # Trigger when a release is published
 
+permissions:
+  contents: read  # Required to download release assets
+
 jobs:
   publish:
     runs-on: ubuntu-latest

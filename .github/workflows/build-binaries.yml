@@ -6,6 +6,9 @@ on:
     tags:
       - 'v*'  # Trigger on version tags like v0.1.0
 
+permissions:
+  contents: write  # Required to create releases and upload assets
+
 jobs:
   build:
     name: Build ${{ matrix.target }}
