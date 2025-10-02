@@ -47,7 +47,7 @@ cargo run
 
 ### Prerequisites
 
-- Rust (edition 2024)
+- Rust
 - Node.js >= 16 (for npm distribution)
 - Cargo
 
