@@ -14,41 +14,34 @@
 - **Multi-platform Support**: Distributed via npm for easy installation across platforms
 - **Interactive TUI**: Built with [Ratatui](https://ratatui.rs) for a polished terminal experience
 
-## Installation
-
-### Via npm (Recommended)
-
+## Quick Start
 ```bash
 npm install -g learnchain
-npx learnchain --help
+```
+#### Two options to set API Key:
+Option 1: 
+Start learnchain with 
+```bash
+learnchain
+```
+Then, 
+```bash
+"Configure details" -> "OpenAI API key:" -> (set your api key here) -> Enter -> m (menu)
 ```
 
-### From Source
+Option 2:
+```bash
+learnchain --set-openai-key <key>
+```
+
+## Installation From Source
 
 ```bash
-git clone https://github.com/yourusername/learnchain.git
+git clone https://github.com/normand1/learnchain
 cd learnchain
-cargo build --release
-./target/release/learnchain
+cargo build
+cargo run
 ```
-
-## Quick Start
-
-1. **Configure your OpenAI API key** (required for quiz generation):
-   ```bash
-   npx learnchain --set-openai-key sk-...
-   ```
-
-   Or configure it directly in the TUI: Config view → "OpenAI API key" → press Enter to edit
-
-2. **Launch the terminal UI**:
-   ```bash
-   cargo run
-   # or if installed via npm:
-   npx learnchain
-   ```
-
-3. Navigate the menu to load session logs, configure defaults, and start learning!
 
 ## Development
 
