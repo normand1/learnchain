@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-![LearnChain Demo](@readme_resources/example-movie.mp4)
+https://github.com/normand1/learnchain/assets/1002439/example-movie.mp4
 
 **LearnChain** is a terminal-based learning tool that helps you learn to code while using generative AI to build projects. It analyzes your Codex or Claude session logs and surfaces interactive quizzes in a beautiful terminal UI, reinforcing concepts as you work.
 
