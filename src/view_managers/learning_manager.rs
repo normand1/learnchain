@@ -205,8 +205,7 @@ impl<'a> LearningManager<'a> {
             return;
         }
 
-        self.reset_feedback();
-        self.ensure_indices();
+        self.on_quiz_complete();
     }
 
     pub(crate) fn previous_question(&mut self) {
@@ -292,6 +291,12 @@ impl<'a> LearningManager<'a> {
         let label = ((b'A' + (selected_index % 26) as u8) as char).to_string();
         let correct = question.options[selected_index].is_correct_answer;
 
+        self.app.record_quiz_first_attempt(
+            self.app.learning_group_index,
+            self.app.learning_quiz_index,
+            correct,
+        );
+
         if correct {
             self.app.learning_feedback =
                 Some(format!("Correct! Option {} is the right answer.", label));
@@ -364,6 +369,16 @@ impl<'a> LearningManager<'a> {
         false
     }
 
+    fn on_quiz_complete(&mut self) {
+        self.reset_feedback();
+        self.app.learning_summary_revealed = true;
+        self.app.learning_waiting_for_next = false;
+        self.app.learning_feedback = Some(
+            "You answered every question in the current lesson! Press g to generate new questions or m to return to the menu.".to_string(),
+        );
+        log_debug("App: user completed all quiz questions");
+    }
+
     fn move_to_previous_group_with_quiz(&mut self) -> bool {
         let Some(total_groups) = self.total_groups() else {
             return false;
@@ -412,9 +427,11 @@ impl<'a> LearningManager<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai_manager::{KnowledgeResponse, QuizItem, QuizOption};
     use crate::config::{AppConfig, ConfigForm, OpenAiModelKind};
     use serde_json::from_str;
     use std::{
+        collections::HashSet,
         fs,
         path::{Path, PathBuf},
     };
@@ -461,6 +478,10 @@ mod tests {
             config_form: ConfigForm::from_config(AppConfig::default()),
             write_output_artifacts: false,
             openai_model: OpenAiModelKind::Gpt5Mini,
+            quiz_first_attempts: HashSet::new(),
+            analytics_snapshot: None,
+            analytics_error: None,
+            analytics_refreshed_at: None,
         }
     }
 
@@ -569,5 +590,45 @@ mod tests {
             !app.learning_waiting_for_next,
             "cycling should clear waiting state"
         );
+    }
+
+    #[test]
+    fn select_option_records_first_attempt_only_once() {
+        let response = StructuredLearningResponse {
+            response: vec![KnowledgeResponse {
+                knowledge_type_group: "Rust Fundamentals".to_string(),
+                summary: "Borrow checker overview".to_string(),
+                quiz: vec![QuizItem {
+                    question: "What guarantees memory safety?".to_string(),
+                    options: vec![
+                        QuizOption {
+                            selection: "The borrow checker".to_string(),
+                            is_correct_answer: true,
+                        },
+                        QuizOption {
+                            selection: "Manual memory management".to_string(),
+                            is_correct_answer: false,
+                        },
+                    ],
+                    resources: vec![],
+                }],
+                knowledge_type_language: "Rust".to_string(),
+            }],
+        };
+
+        let mut app = app_with_response(response);
+        app.write_output_artifacts = false;
+
+        {
+            let mut manager = LearningManager::new(&mut app);
+            manager.select_option();
+        }
+        assert_eq!(app.quiz_first_attempts.len(), 1);
+
+        {
+            let mut manager = LearningManager::new(&mut app);
+            manager.select_option();
+        }
+        assert_eq!(app.quiz_first_attempts.len(), 1);
     }
 }

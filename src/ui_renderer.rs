@@ -1,15 +1,19 @@
 use crate::view_managers::menu_manager::MENU_OPTIONS;
 use crate::{
-    AI_LOADING_FRAMES, App, AppView, config, reset_learning_feedback,
+    AI_LOADING_FRAMES, App, AppView, config,
+    knowledge_store::{DailyAnalytics, KnowledgeAnalytics},
+    reset_learning_feedback,
     view_managers::LearningManager,
 };
+use chrono::{Datelike, Duration, Utc, Weekday};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
-    style::{Modifier, Style, Stylize},
-    text::Line,
+    style::{Color, Modifier, Style, Stylize},
+    text::{Line, Span, Text},
     widgets::{Block, List, ListItem, ListState, Paragraph, Wrap},
 };
+use std::cmp;
 
 pub(crate) struct UiRenderer<'a> {
     app: &'a mut App,
@@ -26,6 +30,7 @@ impl<'a> UiRenderer<'a> {
             AppView::Events => self.render_events(frame),
             AppView::Learning => self.render_learning(frame),
             AppView::Config => self.render_config(frame),
+            AppView::Analytics => self.render_analytics(frame),
         }
     }
 
@@ -45,7 +50,7 @@ impl<'a> UiRenderer<'a> {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),
-                Constraint::Min(6),
+                Constraint::Min(8),
                 Constraint::Length(4),
             ])
             .split(frame.area());
@@ -59,13 +64,17 @@ impl<'a> UiRenderer<'a> {
 
         let menu_sections = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(3)])
+            .constraints([Constraint::Length(5), Constraint::Min(3)])
             .split(layout[1]);
 
-        let actions_items = vec![ListItem::new(MENU_OPTIONS[0])];
+        let actions_items: Vec<ListItem> = MENU_OPTIONS[..2]
+            .iter()
+            .map(|label| ListItem::new(*label))
+            .collect();
+        let actions_len = actions_items.len();
         let mut actions_state = ListState::default();
-        if app.menu_index == 0 {
-            actions_state.select(Some(0));
+        if app.menu_index < actions_len {
+            actions_state.select(Some(app.menu_index));
         }
 
         frame.render_stateful_widget(
@@ -77,13 +86,13 @@ impl<'a> UiRenderer<'a> {
             &mut actions_state,
         );
 
-        let config_items: Vec<ListItem> = MENU_OPTIONS[1..]
+        let config_items: Vec<ListItem> = MENU_OPTIONS[2..]
             .iter()
             .map(|label| ListItem::new(*label))
             .collect();
         let mut config_state = ListState::default();
-        if app.menu_index > 0 {
-            config_state.select(Some(app.menu_index - 1));
+        if app.menu_index >= actions_len {
+            config_state.select(Some(app.menu_index - actions_len));
         }
 
         frame.render_stateful_widget(
@@ -103,8 +112,7 @@ impl<'a> UiRenderer<'a> {
             status_lines.push(format!("AI: {}", status));
         }
         status_lines.push("Use ↑/↓ or j/k to choose. Press Enter to select.".to_string());
-        status_lines
-            .push("Press 1, 2, or 3 for quick selection. Esc, Ctrl-C, or q to quit.".to_string());
+        status_lines.push("Press 1-4 for quick selection. Esc, Ctrl-C, or q to quit.".to_string());
         if app.learning_response.is_some() {
             status_lines.push("Press l to revisit the latest learning response.".to_string());
         }
@@ -115,6 +123,438 @@ impl<'a> UiRenderer<'a> {
                 .block(Block::bordered().title(Line::from("Status"))),
             layout[2],
         );
+    }
+
+    fn render_analytics(&mut self, frame: &mut Frame) {
+        let app = &mut *self.app;
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(5),
+                Constraint::Min(14),
+                Constraint::Length(5),
+            ])
+            .split(frame.area());
+
+        let title = Line::from("Learning Analytics Dashboard")
+            .bold()
+            .green()
+            .centered();
+
+        let summary_text = if let Some(snapshot) = app.analytics_snapshot.as_ref() {
+            let accuracy = if snapshot.total_attempts > 0 {
+                (snapshot.total_first_try_correct as f64 / snapshot.total_attempts as f64) * 100.0
+            } else {
+                0.0
+            };
+            format!(
+                "Tracking the last {} day(s). First-try accuracy: {:>5.1}%.",
+                snapshot.daily.len(),
+                accuracy
+            )
+        } else {
+            "No analytics available yet. Complete a lesson then press r to refresh.".to_string()
+        };
+
+        frame.render_widget(
+            Paragraph::new(summary_text)
+                .style(Style::default().fg(Color::Rgb(180, 205, 255)))
+                .block(
+                    Block::bordered()
+                        .title(title)
+                        .border_style(Style::default().fg(Color::Rgb(120, 140, 220))),
+                )
+                .wrap(Wrap { trim: true })
+                .centered(),
+            layout[0],
+        );
+
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+            .margin(1)
+            .split(layout[1]);
+
+        if let Some(snapshot) = app.analytics_snapshot.as_ref() {
+            let heatmap = Paragraph::new(Self::analytics_heatmap(snapshot))
+                .block(
+                    Block::bordered()
+                        .title(Line::from("Daily first-try performance"))
+                        .border_style(Style::default().fg(Color::Rgb(120, 140, 220))),
+                )
+                .wrap(Wrap { trim: false });
+            frame.render_widget(heatmap, body[0]);
+
+            let summary_lines = Self::analytics_summary_lines(snapshot, app);
+            frame.render_widget(
+                Paragraph::new(Text::from(summary_lines))
+                    .style(Style::default().fg(Color::Rgb(189, 255, 154)))
+                    .block(
+                        Block::bordered()
+                            .title(Line::from("Highlights"))
+                            .border_style(Style::default().fg(Color::Rgb(120, 140, 220))),
+                    )
+                    .wrap(Wrap { trim: true }),
+                body[1],
+            );
+        } else {
+            let message = if let Some(error) = app.analytics_error.as_ref() {
+                format!("Unable to load analytics: {}", error)
+            } else {
+                "Analytics data will appear after you record quiz attempts.".to_string()
+            };
+
+            frame.render_widget(
+                Paragraph::new(message.clone())
+                    .block(
+                        Block::bordered()
+                            .title(Line::from("Daily first-try performance"))
+                            .border_style(Style::default().fg(Color::Rgb(120, 140, 220))),
+                    )
+                    .wrap(Wrap { trim: true }),
+                body[0],
+            );
+
+            frame.render_widget(
+                Paragraph::new(message)
+                    .block(
+                        Block::bordered()
+                            .title(Line::from("Highlights"))
+                            .border_style(Style::default().fg(Color::Rgb(120, 140, 220))),
+                    )
+                    .wrap(Wrap { trim: true }),
+                body[1],
+            );
+        }
+
+        let mut footer_lines = Vec::new();
+        footer_lines.push("Press r to refresh analytics.".to_string());
+        footer_lines.push("Press m to return to the main menu.".to_string());
+        frame.render_widget(
+            Paragraph::new(footer_lines.join("\n"))
+                .style(Style::default().fg(Color::Rgb(180, 205, 255)))
+                .block(
+                    Block::bordered()
+                        .title(Line::from("Commands"))
+                        .border_style(Style::default().fg(Color::Rgb(120, 140, 220))),
+                ),
+            layout[2],
+        );
+    }
+
+    fn analytics_heatmap(snapshot: &KnowledgeAnalytics) -> Text<'static> {
+        if snapshot.daily.is_empty() {
+            return Text::from(vec![Line::from(
+                "No analytics recorded yet. Generate a learning session to get started.",
+            )]);
+        }
+
+        let start_date = snapshot
+            .daily
+            .first()
+            .map(|day| day.date)
+            .unwrap_or_else(|| Utc::now().date_naive() - Duration::days(29));
+        let weeks = cmp::max((snapshot.daily.len() + 6) / 7, 1);
+        let mut grid: Vec<Vec<Option<&DailyAnalytics>>> = vec![vec![None; weeks]; 7];
+
+        for day in &snapshot.daily {
+            let delta = (day.date - start_date).num_days();
+            if delta < 0 {
+                continue;
+            }
+            let column = cmp::min((delta / 7) as usize, weeks - 1);
+            let row = day.date.weekday().num_days_from_monday() as usize;
+            grid[row][column] = Some(day);
+        }
+
+        let max_correct = snapshot
+            .daily
+            .iter()
+            .map(|day| day.first_try_correct)
+            .max()
+            .unwrap_or(0);
+
+        let mut lines: Vec<Line> = Vec::new();
+        let cell_width = 3usize;
+        let mut header_spans = Vec::new();
+        header_spans.push(Span::styled(
+            "    ",
+            Style::default()
+                .fg(Color::Rgb(140, 160, 220))
+                .add_modifier(Modifier::DIM),
+        ));
+        for col in 0..weeks {
+            header_spans.push(Span::styled(
+                format!("{:^width$}", format!("W{}", col + 1), width = cell_width),
+                Style::default()
+                    .fg(Color::Rgb(140, 160, 220))
+                    .add_modifier(Modifier::DIM),
+            ));
+        }
+        lines.push(Line::from(header_spans));
+
+        let day_labels = [
+            (Weekday::Mon, "Mon"),
+            (Weekday::Tue, "Tue"),
+            (Weekday::Wed, "Wed"),
+            (Weekday::Thu, "Thu"),
+            (Weekday::Fri, "Fri"),
+            (Weekday::Sat, "Sat"),
+            (Weekday::Sun, "Sun"),
+        ];
+
+        for (weekday, label) in day_labels {
+            let row_index = weekday.num_days_from_monday() as usize;
+            let mut spans = Vec::new();
+            spans.push(Span::styled(
+                format!("{label:>3} "),
+                Style::default()
+                    .fg(Color::Rgb(140, 160, 220))
+                    .add_modifier(Modifier::DIM),
+            ));
+
+            for col in 0..weeks {
+                if let Some(day) = grid[row_index][col] {
+                    let color = Self::heatmap_color(day.first_try_correct, max_correct);
+                    let style = Style::default()
+                        .fg(color)
+                        .bg(Color::Rgb(22, 24, 46))
+                        .add_modifier(Modifier::BOLD);
+                    let glyph = if day.total_questions == 0 && day.total_attempts == 0 {
+                        "·"
+                    } else if day.first_try_correct == 0 {
+                        "∙"
+                    } else {
+                        "●"
+                    };
+                    spans.push(Span::styled(
+                        format!("{:^width$}", glyph, width = cell_width),
+                        style,
+                    ));
+                } else {
+                    spans.push(Span::styled(
+                        format!("{:^width$}", "∙", width = cell_width),
+                        Style::default()
+                            .fg(Color::Rgb(60, 70, 110))
+                            .bg(Color::Rgb(18, 20, 34))
+                            .add_modifier(Modifier::DIM),
+                    ));
+                }
+            }
+
+            lines.push(Line::from(spans));
+        }
+
+        if max_correct == 0 {
+            lines.push(Line::from(vec![Span::styled(
+                "No first-try correct answers recorded yet.",
+                Style::default().fg(Color::Rgb(140, 160, 220)),
+            )]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "Legend: ",
+                    Style::default()
+                        .fg(Color::Rgb(189, 255, 154))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "●",
+                    Style::default()
+                        .fg(Self::heatmap_color(max_correct, max_correct))
+                        .bg(Color::Rgb(22, 24, 46)),
+                ),
+                Span::raw(" higher correctness  "),
+                Span::styled(
+                    "●",
+                    Style::default()
+                        .fg(Self::heatmap_color(1, max_correct))
+                        .bg(Color::Rgb(22, 24, 46)),
+                ),
+                Span::raw(" lower correctness"),
+            ]));
+        }
+
+        Text::from(lines)
+    }
+
+    fn heatmap_color(value: u32, max_value: u32) -> Color {
+        if max_value == 0 || value == 0 {
+            return Color::Rgb(90, 110, 150);
+        }
+        let ratio = value as f32 / max_value as f32;
+        if ratio < 0.25 {
+            Color::Rgb(137, 196, 125)
+        } else if ratio < 0.5 {
+            Color::Rgb(154, 222, 138)
+        } else if ratio < 0.75 {
+            Color::Rgb(184, 247, 153)
+        } else {
+            Color::Rgb(231, 252, 173)
+        }
+    }
+
+    fn analytics_summary_lines(snapshot: &KnowledgeAnalytics, app: &App) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+
+        lines.push(Self::metric_line(
+            "Total quiz questions",
+            snapshot.total_questions,
+            Color::Rgb(189, 255, 154),
+        ));
+
+        let accuracy = if snapshot.total_attempts > 0 {
+            (snapshot.total_first_try_correct as f64 / snapshot.total_attempts as f64) * 100.0
+        } else {
+            0.0
+        };
+        lines.push(Self::ratio_line(
+            "First-try correct",
+            snapshot.total_first_try_correct,
+            snapshot.total_attempts,
+            accuracy,
+        ));
+
+        let active_days = snapshot
+            .daily
+            .iter()
+            .filter(|day| day.total_questions > 0 || day.total_attempts > 0)
+            .count();
+        lines.push(Self::metric_line(
+            "Active study days",
+            active_days as u32,
+            Color::Rgb(180, 205, 255),
+        ));
+
+        let total_groups = snapshot
+            .daily
+            .last()
+            .map(|day| day.cumulative_groups)
+            .unwrap_or(snapshot.knowledge_groups.len() as u32);
+        lines.push(Self::metric_line(
+            "Total knowledge groups",
+            total_groups,
+            Color::Rgb(189, 255, 154),
+        ));
+
+        lines.extend(Self::group_bar_lines(snapshot));
+
+        if let Some(refreshed) = app.analytics_refreshed_at.as_ref() {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "Refreshed: ",
+                    Style::default()
+                        .fg(Color::Rgb(140, 160, 220))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    refreshed.clone(),
+                    Style::default().fg(Color::Rgb(189, 255, 154)),
+                ),
+            ]));
+        }
+
+        if let Some(error) = app.analytics_error.as_ref() {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "Warning: ",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(error.clone(), Style::default().fg(Color::Red)),
+            ]));
+        }
+
+        lines
+    }
+
+    fn metric_line(label: &str, value: u32, color: Color) -> Line<'static> {
+        let bold = Style::default().fg(color).add_modifier(Modifier::BOLD);
+        Line::from(vec![
+            Span::styled(format!("{label}: "), bold),
+            Span::styled(value.to_string(), Style::default().fg(color)),
+        ])
+    }
+
+    fn ratio_line(label: &str, numerator: u32, denominator: u32, percentage: f64) -> Line<'static> {
+        let bar = Self::ratio_bar(numerator, denominator, 12);
+        Line::from(vec![
+            Span::styled(
+                format!("{label}: "),
+                Style::default()
+                    .fg(Color::Rgb(189, 255, 154))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{} of {} ({:.1}%) ", numerator, denominator, percentage),
+                Style::default().fg(Color::Rgb(180, 205, 255)),
+            ),
+            Span::styled(bar, Style::default().fg(Color::Rgb(189, 255, 154))),
+        ])
+    }
+
+    fn ratio_bar(value: u32, max: u32, width: usize) -> String {
+        if max == 0 {
+            return "∙".repeat(width);
+        }
+        let filled = ((value as f64 / max as f64) * width as f64).round() as usize;
+        let filled = filled.min(width);
+        format!("{}{}", "█".repeat(filled), "·".repeat(width - filled))
+    }
+
+    fn group_bar_lines(snapshot: &KnowledgeAnalytics) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        let weeks = (snapshot.daily.len() + 6) / 7;
+        if weeks == 0 {
+            lines.push(Line::from(vec![Span::styled(
+                "No knowledge group activity yet.",
+                Style::default().fg(Color::Rgb(140, 160, 220)),
+            )]));
+            return lines;
+        }
+
+        let mut weekly_totals: Vec<u32> = Vec::with_capacity(weeks);
+        for week_index in 0..weeks {
+            let end = ((week_index + 1) * 7).min(snapshot.daily.len());
+            if end == 0 {
+                weekly_totals.push(0);
+                continue;
+            }
+            let value = snapshot.daily[end - 1].cumulative_groups;
+            weekly_totals.push(value);
+        }
+
+        let max = weekly_totals.iter().copied().max().unwrap_or(0);
+        if max == 0 {
+            lines.push(Line::from(vec![Span::styled(
+                "Knowledge groups have not been recorded yet.",
+                Style::default().fg(Color::Rgb(140, 160, 220)),
+            )]));
+            return lines;
+        }
+
+        lines.push(Line::from(vec![Span::styled(
+            "Knowledge groups growth:",
+            Style::default()
+                .fg(Color::Rgb(189, 255, 154))
+                .add_modifier(Modifier::BOLD),
+        )]));
+
+        for (index, value) in weekly_totals.iter().enumerate() {
+            let bar = Self::ratio_bar(*value, max, 16);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" W{:>2}: ", index + 1),
+                    Style::default().fg(Color::Rgb(140, 160, 220)),
+                ),
+                Span::styled(bar, Style::default().fg(Color::Rgb(189, 255, 154))),
+                Span::styled(
+                    format!(" {:>3}", value),
+                    Style::default().fg(Color::Rgb(180, 205, 255)),
+                ),
+            ]));
+        }
+
+        lines
     }
 
     fn render_events(&mut self, frame: &mut Frame) {
