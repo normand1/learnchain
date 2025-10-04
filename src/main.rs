@@ -1,5 +1,6 @@
 mod ai_manager;
 mod config;
+mod knowledge_store;
 mod log_util;
 mod markdown_rules;
 mod output_manager;
@@ -12,12 +13,13 @@ use color_eyre::Result;
 use config::ConfigForm;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use dotenvy::dotenv;
+use knowledge_store::KnowledgeAnalytics;
 use output_manager::OutputManager;
 use ratatui::{DefaultTerminal, Frame};
 use session_manager::{SessionEvent, SessionLoad, SessionManager};
-use std::{path::PathBuf, sync::mpsc::Receiver, time::Duration};
+use std::{collections::HashSet, path::PathBuf, sync::mpsc::Receiver, time::Duration};
 use ui_renderer::UiRenderer;
-use view_managers::{ConfigManager, LearningManager, MenuManager};
+use view_managers::{AnalyticsManager, ConfigManager, LearningManager, MenuManager};
 
 pub(crate) const AI_LOADING_FRAMES: [&str; 4] = ["-", "\\", "|", "/"];
 pub(crate) const OPENAI_KEY_HELP: &str = "OpenAI API key not configured. Open the Config view (select \"OpenAI API key\" and press Enter) or run `learnchain --set-openai-key <your-key>` to add it.";
@@ -28,6 +30,7 @@ pub(crate) enum AppView {
     Events,
     Learning,
     Config,
+    Analytics,
 }
 
 #[derive(Debug)]
@@ -150,6 +153,14 @@ pub struct App {
     pub(crate) write_output_artifacts: bool,
     /// Currently selected OpenAI model.
     pub(crate) openai_model: config::OpenAiModelKind,
+    /// Tracks which quiz questions have already had their first attempt persisted.
+    pub(crate) quiz_first_attempts: HashSet<(usize, usize)>,
+    /// Cached analytics snapshot for the dashboard view.
+    pub(crate) analytics_snapshot: Option<KnowledgeAnalytics>,
+    /// Any error that occurred when loading analytics data.
+    pub(crate) analytics_error: Option<String>,
+    /// Timestamp of the most recent analytics refresh.
+    pub(crate) analytics_refreshed_at: Option<String>,
 }
 
 impl App {
@@ -212,6 +223,10 @@ impl App {
             config_form: ConfigForm::from_config(config_snapshot.clone()),
             write_output_artifacts,
             openai_model,
+            quiz_first_attempts: HashSet::new(),
+            analytics_snapshot: None,
+            analytics_error: None,
+            analytics_refreshed_at: None,
         };
 
         app.apply_session_load(session_load);
@@ -326,6 +341,7 @@ impl App {
                 AppView::Events => MenuManager::new(self).handle_events_key(key),
                 AppView::Learning => LearningManager::new(self).handle_key(key),
                 AppView::Config => ConfigManager::new(self).handle_key(key),
+                AppView::Analytics => AnalyticsManager::new(self).handle_key(key),
             },
         }
     }
@@ -349,6 +365,81 @@ impl App {
             existing.push_str(&message);
         } else {
             *slot = Some(message);
+        }
+    }
+
+    pub(crate) fn record_quiz_first_attempt(
+        &mut self,
+        group_index: usize,
+        question_index: usize,
+        correct: bool,
+    ) {
+        if !self
+            .quiz_first_attempts
+            .insert((group_index, question_index))
+        {
+            return;
+        }
+
+        if !self.write_output_artifacts {
+            crate::log_util::log_debug(
+                "App: skipping quiz attempt persistence (artifacts disabled)",
+            );
+            return;
+        }
+
+        let Some(response) = self.learning_response.as_ref() else {
+            crate::log_util::log_debug(
+                "App: cannot record quiz attempt because no learning response is loaded",
+            );
+            return;
+        };
+        let Some(group) = response.response.get(group_index) else {
+            crate::log_util::log_debug(&format!(
+                "App: quiz attempt group index {} out of bounds",
+                group_index
+            ));
+            return;
+        };
+        let Some(question) = group.quiz.get(question_index) else {
+            crate::log_util::log_debug(&format!(
+                "App: quiz attempt question index {} out of bounds for group {}",
+                question_index, group_index
+            ));
+            return;
+        };
+
+        let language = if group.knowledge_type_language.trim().is_empty() {
+            None
+        } else {
+            Some(group.knowledge_type_language.as_str())
+        };
+
+        match crate::knowledge_store::record_quiz_first_attempt(
+            &self.session_date,
+            &group.knowledge_type_group,
+            language,
+            &question.question,
+            correct,
+        ) {
+            Ok(_) => {
+                crate::log_util::log_debug(&format!(
+                    "App: recorded first attempt for '{}' (correct: {})",
+                    question.question, correct
+                ));
+                self.analytics_snapshot = None;
+                self.analytics_refreshed_at = None;
+            }
+            Err(err) => {
+                Self::push_error(
+                    &mut self.error,
+                    format!("Failed to record quiz attempt: {}", err),
+                );
+                crate::log_util::log_debug(&format!(
+                    "App: failed to persist quiz attempt for '{}': {}",
+                    question.question, err
+                ));
+            }
         }
     }
 }
