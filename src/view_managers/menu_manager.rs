@@ -1,13 +1,15 @@
 use super::{
-    config_manager::ConfigManager, events_manager::EventsManager, learning_manager::LearningManager,
+    analytics_manager::AnalyticsManager, config_manager::ConfigManager,
+    events_manager::EventsManager, learning_manager::LearningManager,
 };
 use crate::{App, ai_manager};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-pub(crate) const MENU_OPTIONS: [&str; 3] = [
-    "1. Generate Learning lesson",
-    "2. View session events",
-    "3. Configure details",
+pub(crate) const MENU_OPTIONS: [&str; 4] = [
+    "1. Generate learning lesson",
+    "2. View analytics dashboard",
+    "3. View session events",
+    "4. Configure details",
 ];
 
 pub(crate) struct MenuManager<'a> {
@@ -34,6 +36,10 @@ impl<'a> MenuManager<'a> {
             }
             (KeyModifiers::NONE, KeyCode::Char('3')) => {
                 self.app.menu_index = 2;
+                self.activate_menu_option();
+            }
+            (KeyModifiers::NONE, KeyCode::Char('4')) => {
+                self.app.menu_index = 3;
                 self.activate_menu_option();
             }
             (KeyModifiers::NONE, KeyCode::Char('c') | KeyCode::Char('C')) => {
@@ -73,8 +79,9 @@ impl<'a> MenuManager<'a> {
     fn activate_menu_option(&mut self) {
         match self.app.menu_index {
             0 => ai_manager::trigger_learning_response(self.app),
-            1 => EventsManager::show_events(self.app),
-            2 => ConfigManager::new(self.app).show_config(),
+            1 => AnalyticsManager::show_analytics(self.app),
+            2 => EventsManager::show_events(self.app),
+            3 => ConfigManager::new(self.app).show_config(),
             _ => {}
         }
     }

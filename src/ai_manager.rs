@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    AI_LOADING_FRAMES, AiTaskMessage, App, AppView, config,
+    AI_LOADING_FRAMES, AiTaskMessage, App, AppView, config, knowledge_store,
     log_util::{self, log_debug},
     output_manager::OutputManager,
     reset_learning_feedback,
@@ -346,6 +346,15 @@ pub(crate) fn handle_ai_success(app: &mut App, mut structured: StructuredLearnin
         .sum();
 
     let save_result = write_ai_response(app, &structured);
+    let store_result = if app.write_output_artifacts {
+        Some(knowledge_store::record_learning_response(
+            &app.session_date,
+            &structured,
+        ))
+    } else {
+        log_debug("App: skipping knowledge store persistence (artifacts disabled)");
+        None
+    };
     let mut status_parts = Vec::new();
     match save_result {
         Ok(saved_path) => {
@@ -365,6 +374,25 @@ pub(crate) fn handle_ai_success(app: &mut App, mut structured: StructuredLearnin
         }
     }
 
+    if let Some(store_result) = store_result {
+        match store_result {
+            Ok(_) => {
+                status_parts.push("Knowledge history updated".to_string());
+                log_debug("App: recorded learning response in knowledge store");
+            }
+            Err(err) => {
+                App::push_error(
+                    &mut app.error,
+                    format!("Failed to record knowledge history: {}", err),
+                );
+                log_debug(&format!(
+                    "App: failed to persist learning response to knowledge store: {}",
+                    err
+                ));
+            }
+        }
+    }
+
     status_parts.push(format!("Knowledge groups: {}", group_count));
     status_parts.push(format!("Total quiz questions: {}", total_questions));
     app.ai_status = Some(status_parts.join(" • "));
@@ -377,6 +405,9 @@ pub(crate) fn handle_ai_success(app: &mut App, mut structured: StructuredLearnin
         &mut app.learning_summary_revealed,
         &mut app.learning_waiting_for_next,
     );
+    app.quiz_first_attempts.clear();
+    app.analytics_snapshot = None;
+    app.analytics_refreshed_at = None;
     app.learning_response = Some(structured);
     log_debug(&format!(
         "App: loaded learning response with {} group(s)",
@@ -570,6 +601,7 @@ mod tests {
     use super::*;
     use crate::config::{AppConfig, ConfigForm, OpenAiModelKind};
     use std::{
+        collections::HashSet,
         path::{Path, PathBuf},
         sync::mpsc,
     };
@@ -603,6 +635,10 @@ mod tests {
             config_form: ConfigForm::from_config(AppConfig::default()),
             write_output_artifacts: false,
             openai_model: OpenAiModelKind::Gpt5Mini,
+            quiz_first_attempts: HashSet::new(),
+            analytics_snapshot: None,
+            analytics_error: None,
+            analytics_refreshed_at: None,
         }
     }
 
