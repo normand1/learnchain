@@ -420,22 +420,24 @@ mod tests {
         let response = sample_response();
         record_learning_response_at_path(&db_path, "2024-05-01", &response).unwrap();
 
-        let connection = Connection::open(&db_path).unwrap();
-        let row_count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM knowledge_responses", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(row_count, response.response.len() as i64);
+        {
+            let connection = Connection::open(&db_path).unwrap();
+            let row_count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM knowledge_responses", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(row_count, response.response.len() as i64);
 
-        let question_count: i64 = connection
-            .query_row(
-                "SELECT quiz_question_count FROM knowledge_responses LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(question_count, 1);
+            let question_count: i64 = connection
+                .query_row(
+                    "SELECT quiz_question_count FROM knowledge_responses LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(question_count, 1);
+        }
 
         fs::remove_dir_all(&temp_dir).unwrap();
     }
@@ -493,20 +495,22 @@ mod tests {
         )
         .unwrap();
 
-        let connection = Connection::open(&db_path).unwrap();
-        let row_count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM quiz_attempts", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(row_count, 1);
+        {
+            let connection = Connection::open(&db_path).unwrap();
+            let row_count: i64 = connection
+                .query_row("SELECT COUNT(*) FROM quiz_attempts", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(row_count, 1);
 
-        let first_try_correct: i64 = connection
-            .query_row(
-                "SELECT first_try_correct FROM quiz_attempts LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(first_try_correct, 0);
+            let first_try_correct: i64 = connection
+                .query_row(
+                    "SELECT first_try_correct FROM quiz_attempts LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(first_try_correct, 0);
+        }
 
         fs::remove_dir_all(&temp_dir).unwrap();
     }
@@ -531,15 +535,17 @@ mod tests {
         )
         .unwrap();
 
-        let connection = Connection::open(&db_path).unwrap();
-        let language: Option<String> = connection
-            .query_row(
-                "SELECT knowledge_type_language FROM quiz_attempts LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(language.is_none());
+        {
+            let connection = Connection::open(&db_path).unwrap();
+            let language: Option<String> = connection
+                .query_row(
+                    "SELECT knowledge_type_language FROM quiz_attempts LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(language.is_none());
+        }
 
         fs::remove_dir_all(&temp_dir).unwrap();
     }
