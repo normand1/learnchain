@@ -29,6 +29,7 @@ jobs:
           fi
 
           echo "Downloading binaries from release: $TAG"
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
 
           # Download all binaries from the release
           mkdir -p dist
@@ -44,6 +45,20 @@ jobs:
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Align package version with release tag
+        run: |
+          if [ -z "$RELEASE_TAG" ]; then
+            echo "RELEASE_TAG not set" >&2
+            exit 1
+          fi
+          VERSION=${RELEASE_TAG#v}
+          if [ -z "$VERSION" ]; then
+            echo "Unable to derive version from tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          echo "Using package version $VERSION"
+          npm version "$VERSION" --no-git-tag-version
 
       - name: Generate launcher script
         run: node scripts/generate-launcher.js
