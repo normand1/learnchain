@@ -15,7 +15,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.9"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
-tokio = { version = "1.37", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread"] }
 dotenvy = "0.15"
 rand = "0.9"
 rusqlite = { version = "0.31", features = ["bundled"] }
