@@ -52,7 +52,7 @@ jobs:
           fi
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.binary_name }}
           path: dist/${{ matrix.binary_name }}
