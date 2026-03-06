@@ -1,21 +1,17 @@
 {
   "name": "learnchain",
   "version": "0.1.0",
-  "description": "Terminal-based learning tool that analyzes AI coding sessions and generates interactive quizzes",
-  "license": "MIT",
   "author": "Dave Norman <david.norman.w@gmail.com>",
-  "bin": {
-    "learnchain": "dist/learnchain.js"
-  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/normand1/learnchain"
   },
-  "scripts": {
-    "build": "cargo build --release",
-    "build:all": "echo 'Use GitHub Actions workflow to build all platform binaries'",
-    "postinstall": "node scripts/install.js",
-    "prepublishOnly": "node scripts/generate-launcher.js"
+  "bin": {
+    "learnchain": "dist/learnchain.js"
+  },
+  "description": "Terminal-based learning tool that analyzes AI coding sessions and generates interactive quizzes",
+  "engines": {
+    "node": ">=16"
   },
   "files": [
     "dist/",
@@ -36,7 +32,11 @@
     "education",
     "rust"
   ],
-  "engines": {
-    "node": ">=16"
+  "license": "MIT",
+  "scripts": {
+    "build": "cargo build --release",
+    "build:all": "echo 'Use GitHub Actions workflow to build all platform binaries'",
+    "postinstall": "node scripts/install.js",
+    "prepublishOnly": "node scripts/generate-launcher.js"
   }
 }

@@ -1,26 +1,55 @@
-mod ai_manager;
 mod config;
+mod knowledge_store;
+mod llm;
 mod log_util;
 mod markdown_rules;
 mod output_manager;
 mod session_manager;
+mod session_sources;
 mod ui_renderer;
 mod view_managers;
 
-use ai_manager::{AiManager, StructuredLearningResponse, poll_ai_messages};
 use color_eyre::Result;
 use config::ConfigForm;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use dotenvy::dotenv;
+use knowledge_store::KnowledgeAnalytics;
+use llm::{
+    LearningGenerationResult, LearningGenerator, StructuredLearningResponse, poll_ai_messages,
+};
 use output_manager::OutputManager;
 use ratatui::{DefaultTerminal, Frame};
-use session_manager::{SessionEvent, SessionLoad, SessionManager};
-use std::{path::PathBuf, sync::mpsc::Receiver, time::Duration};
+use session_manager::SessionManager;
+use session_sources::{Session, SessionEvent, SessionLoad};
+use std::{
+    collections::HashSet,
+    path::PathBuf,
+    sync::mpsc::Receiver,
+    time::{Duration, Instant},
+};
 use ui_renderer::UiRenderer;
-use view_managers::{ConfigManager, LearningManager, MenuManager};
+use view_managers::{AnalyticsManager, ConfigManager, LearningManager, MenuManager};
 
 pub(crate) const AI_LOADING_FRAMES: [&str; 4] = ["-", "\\", "|", "/"];
-pub(crate) const OPENAI_KEY_HELP: &str = "OpenAI API key not configured. Open the Config view (select \"OpenAI API key\" and press Enter) or run `learnchain --set-openai-key <your-key>` to add it.";
+const HELP_TEXT: &str = "learnchain options:\n  --debug, -d               write runtime debug logs to output/learnchain-debug.log\n  --set-openai-key <key>    store your OpenAI API key\n  --clear-openai-key        remove the stored OpenAI API key\n  --set-anthropic-key <key> store your Anthropic API key\n  --clear-anthropic-key     remove the stored Anthropic API key\n  --set-openrouter-key <key> store your OpenRouter API key\n  --clear-openrouter-key    remove the stored OpenRouter API key\n  --help                    show this message\n  --version                 show version";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CliCommand {
+    SetOpenAiKey(String),
+    ClearOpenAiKey,
+    SetAnthropicKey(String),
+    ClearAnthropicKey,
+    SetOpenRouterKey(String),
+    ClearOpenRouterKey,
+    Help,
+    Version,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CliOptions {
+    debug_logging: bool,
+    command: Option<CliCommand>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AppView {
@@ -28,12 +57,14 @@ pub(crate) enum AppView {
     Events,
     Learning,
     Config,
+    Analytics,
 }
 
 #[derive(Debug)]
-enum AiTaskMessage {
-    Success(StructuredLearningResponse),
+pub(crate) enum AiTaskMessage {
+    Success(LearningGenerationResult),
     Error(String),
+    Progress(String, u8), // (message, percentage)
 }
 
 pub(crate) fn reset_learning_feedback(
@@ -48,49 +79,150 @@ pub(crate) fn reset_learning_feedback(
 
 fn main() -> color_eyre::Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 {
-        match args[1].as_str() {
-            "--set-openai-key" => {
-                if let Some(key) = args.get(2) {
-                    config::update(|cfg| cfg.openai_api_key = key.trim().to_string())?;
-                    println!("Stored OpenAI API key in config/app_config.toml.");
-                    return Ok(());
-                } else {
-                    eprintln!("Usage: learnchain --set-openai-key <key>");
-                    std::process::exit(1);
-                }
+    let cli = match parse_cli_options(&args[1..]) {
+        Ok(cli) => cli,
+        Err(message) => {
+            eprintln!("{}", message);
+            std::process::exit(1);
+        }
+    };
+
+    if cli.debug_logging {
+        let log_path = log_util::enable_runtime_debug_logging()?;
+        eprintln!("Debug logging enabled: {}", log_path.display());
+        log_util::log_debug("App: runtime debug logging enabled via CLI flag");
+    }
+
+    if let Some(command) = cli.command {
+        match command {
+            CliCommand::SetOpenAiKey(key) => {
+                config::update(|cfg| cfg.openai_api_key = key.trim().to_string())?;
+                println!("Stored OpenAI API key in config/app_config.toml.");
+                return Ok(());
             }
-            "--clear-openai-key" => {
+            CliCommand::ClearOpenAiKey => {
                 config::update(|cfg| cfg.openai_api_key.clear())?;
                 println!("Cleared OpenAI API key from config/app_config.toml.");
                 return Ok(());
             }
-            "--help" | "-h" => {
-                println!(
-                    "learnchain options:\n  --set-openai-key <key>    store your OpenAI API key in the app config\n  --clear-openai-key       remove the stored OpenAI API key\n  --help                   show this message\n  --version                show version"
-                );
+            CliCommand::SetAnthropicKey(key) => {
+                config::update(|cfg| cfg.anthropic_api_key = key.trim().to_string())?;
+                println!("Stored Anthropic API key in config/app_config.toml.");
                 return Ok(());
             }
-            "--version" | "-V" => {
+            CliCommand::ClearAnthropicKey => {
+                config::update(|cfg| cfg.anthropic_api_key.clear())?;
+                println!("Cleared Anthropic API key from config/app_config.toml.");
+                return Ok(());
+            }
+            CliCommand::SetOpenRouterKey(key) => {
+                config::update(|cfg| cfg.openrouter_api_key = key.trim().to_string())?;
+                println!("Stored OpenRouter API key in config/app_config.toml.");
+                return Ok(());
+            }
+            CliCommand::ClearOpenRouterKey => {
+                config::update(|cfg| cfg.openrouter_api_key.clear())?;
+                println!("Cleared OpenRouter API key from config/app_config.toml.");
+                return Ok(());
+            }
+            CliCommand::Help => {
+                println!("{}", HELP_TEXT);
+                return Ok(());
+            }
+            CliCommand::Version => {
                 println!("learnchain {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
-            }
-            _ => {
-                eprintln!(
-                    "Unrecognized option '{}'. Run `learnchain --help` for usage.",
-                    args[1]
-                );
-                std::process::exit(1);
             }
         }
     }
 
     dotenv().ok();
     color_eyre::install()?;
+    log_util::log_debug("App: starting TUI application");
     let terminal = ratatui::init();
     let result = App::new().run(terminal);
     ratatui::restore();
     result
+}
+
+fn parse_cli_options(args: &[String]) -> std::result::Result<CliOptions, String> {
+    let mut options = CliOptions::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--debug" | "-d" => {
+                options.debug_logging = true;
+                index += 1;
+            }
+            "--set-openai-key" => {
+                let key = args
+                    .get(index + 1)
+                    .ok_or_else(|| "Usage: learnchain --set-openai-key <key>".to_string())?;
+                set_command(&mut options.command, CliCommand::SetOpenAiKey(key.clone()))?;
+                index += 2;
+            }
+            "--clear-openai-key" => {
+                set_command(&mut options.command, CliCommand::ClearOpenAiKey)?;
+                index += 1;
+            }
+            "--set-anthropic-key" => {
+                let key = args
+                    .get(index + 1)
+                    .ok_or_else(|| "Usage: learnchain --set-anthropic-key <key>".to_string())?;
+                set_command(
+                    &mut options.command,
+                    CliCommand::SetAnthropicKey(key.clone()),
+                )?;
+                index += 2;
+            }
+            "--clear-anthropic-key" => {
+                set_command(&mut options.command, CliCommand::ClearAnthropicKey)?;
+                index += 1;
+            }
+            "--set-openrouter-key" => {
+                let key = args
+                    .get(index + 1)
+                    .ok_or_else(|| "Usage: learnchain --set-openrouter-key <key>".to_string())?;
+                set_command(
+                    &mut options.command,
+                    CliCommand::SetOpenRouterKey(key.clone()),
+                )?;
+                index += 2;
+            }
+            "--clear-openrouter-key" => {
+                set_command(&mut options.command, CliCommand::ClearOpenRouterKey)?;
+                index += 1;
+            }
+            "--help" | "-h" => {
+                set_command(&mut options.command, CliCommand::Help)?;
+                index += 1;
+            }
+            "--version" | "-V" => {
+                set_command(&mut options.command, CliCommand::Version)?;
+                index += 1;
+            }
+            value => {
+                return Err(format!(
+                    "Unrecognized option '{}'. Run `learnchain --help` for usage.",
+                    value
+                ));
+            }
+        }
+    }
+
+    Ok(options)
+}
+
+fn set_command(
+    slot: &mut Option<CliCommand>,
+    command: CliCommand,
+) -> std::result::Result<(), String> {
+    if slot.is_some() {
+        return Err("Multiple commands are not supported in a single invocation.".to_string());
+    }
+    *slot = Some(command);
+    Ok(())
 }
 
 /// The main application which holds the state and logic of the application.
@@ -106,6 +238,12 @@ pub struct App {
     pub(crate) events: Vec<SessionEvent>,
     /// Currently selected event index.
     pub(crate) selected_event: Option<usize>,
+    /// All loaded sessions for hierarchical viewing.
+    pub(crate) sessions: Vec<Session>,
+    /// Currently selected session index in sessions list view.
+    pub(crate) selected_session: Option<usize>,
+    /// Whether viewing sessions list (true) or events within a session (false).
+    pub(crate) viewing_sessions_list: bool,
     /// Absolute path to today's session directory.
     pub(crate) session_dir: PathBuf,
     /// Human-readable label for today's date.
@@ -120,14 +258,22 @@ pub struct App {
     pub(crate) summary_content: Option<String>,
     /// Any error encountered while loading files or parsing events.
     pub(crate) error: Option<String>,
-    /// Lazily configured OpenAI integration.
-    pub(crate) ai_manager: Option<AiManager>,
+    /// Current AI provider selection.
+    pub(crate) ai_provider: config::AiProvider,
+    /// Lazily configured LLM integration.
+    pub(crate) learning_generator: Option<LearningGenerator>,
     /// Latest status message related to AI generation requests.
     pub(crate) ai_status: Option<String>,
     /// Indicates whether an AI request is currently running.
     pub(crate) ai_loading: bool,
     /// Spinner frame index for the active loading indicator.
     pub(crate) ai_loading_frame: usize,
+    /// When the AI loading started, for elapsed time display.
+    pub(crate) ai_loading_start: Option<Instant>,
+    /// Current progress percentage (0-100).
+    pub(crate) ai_progress_percent: u8,
+    /// Current progress stage message.
+    pub(crate) ai_progress_message: String,
     /// Receives background AI task updates.
     pub(crate) ai_result_receiver: Option<Receiver<AiTaskMessage>>,
     /// Cached learning response from the most recent AI generation.
@@ -144,12 +290,133 @@ pub struct App {
     pub(crate) learning_summary_revealed: bool,
     /// Indicates that the correct answer was chosen and we are waiting to advance.
     pub(crate) learning_waiting_for_next: bool,
+    /// Whether the learning view is showing session selection (true) or quiz (false).
+    pub(crate) learning_selecting_session: bool,
+    /// Index of selected session in learning session selection view.
+    pub(crate) learning_selected_session: Option<usize>,
+    /// Projects grouped by cwd for session selection.
+    pub(crate) projects: Vec<Project>,
+    /// Index of selected project in learning project selection view.
+    pub(crate) learning_selected_project: Option<usize>,
+    /// Whether viewing projects list (true) or sessions within a project (false).
+    pub(crate) learning_viewing_projects: bool,
     /// Holds the editable configuration state when rendering the config view.
     pub(crate) config_form: ConfigForm,
     /// Whether artifacts should be written to disk.
     pub(crate) write_output_artifacts: bool,
     /// Currently selected OpenAI model.
     pub(crate) openai_model: config::OpenAiModelKind,
+    /// Currently selected Anthropic model.
+    pub(crate) anthropic_model: config::AnthropicModelKind,
+    /// Currently selected OpenRouter model (free-text).
+    pub(crate) openrouter_model: String,
+    /// Tracks which quiz questions have already had their first attempt persisted.
+    pub(crate) quiz_first_attempts: HashSet<(usize, usize)>,
+    /// Tracks first-try correctness for each question (group_index, question_index) -> was_correct.
+    pub(crate) quiz_first_attempt_results: std::collections::HashMap<(usize, usize), bool>,
+    /// Cached analytics snapshot for the dashboard view.
+    pub(crate) analytics_snapshot: Option<KnowledgeAnalytics>,
+    /// Any error that occurred when loading analytics data.
+    pub(crate) analytics_error: Option<String>,
+    /// Timestamp of the most recent analytics refresh.
+    pub(crate) analytics_refreshed_at: Option<String>,
+    /// Timestamp marker of the most recent session event observed.
+    pub(crate) last_event_timestamp: Option<String>,
+    /// Timestamp marker at which the last quiz generation consumed events.
+    pub(crate) last_quiz_event_timestamp: Option<String>,
+    /// Whether the quiz summary screen is being displayed.
+    pub(crate) learning_showing_summary: bool,
+    /// Summary results for display after quiz completion.
+    pub(crate) quiz_summary_results: Vec<QuizSummaryResult>,
+}
+
+/// Stores the result of a single quiz question for the summary screen.
+#[derive(Debug, Clone)]
+pub(crate) struct QuizSummaryResult {
+    pub(crate) question: String,
+    pub(crate) correct_answer: String,
+    pub(crate) first_try_correct: bool,
+}
+
+/// A project groups sessions by their working directory (cwd).
+#[derive(Debug, Clone)]
+pub(crate) struct Project {
+    /// The full cwd path.
+    pub(crate) cwd: String,
+    /// A short display name (last component of path).
+    pub(crate) name: String,
+    /// Indices of sessions belonging to this project.
+    pub(crate) session_indices: Vec<usize>,
+}
+
+impl Project {
+    /// Extract cwd from a session's first event content_texts.
+    pub(crate) fn extract_cwd(session: &session_sources::Session) -> String {
+        session
+            .events
+            .first()
+            .and_then(|event| {
+                event
+                    .content_texts
+                    .iter()
+                    .find(|text| text.starts_with("cwd: "))
+                    .map(|text| text.trim_start_matches("cwd: ").to_string())
+            })
+            .unwrap_or_else(|| "Unknown".to_string())
+    }
+
+    /// Get short project name from cwd path.
+    pub(crate) fn name_from_cwd(cwd: &str) -> String {
+        std::path::Path::new(cwd)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(cwd)
+            .to_string()
+    }
+
+    /// Group sessions into projects by cwd.
+    pub(crate) fn group_sessions(sessions: &[session_sources::Session]) -> Vec<Project> {
+        use std::collections::HashMap;
+
+        let mut cwd_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
+
+        for (idx, session) in sessions.iter().enumerate() {
+            let cwd = Self::extract_cwd(session);
+            cwd_to_indices.entry(cwd).or_default().push(idx);
+        }
+
+        let mut projects: Vec<Project> = cwd_to_indices
+            .into_iter()
+            .map(|(cwd, session_indices)| {
+                let name = Self::name_from_cwd(&cwd);
+                Project {
+                    cwd,
+                    name,
+                    session_indices,
+                }
+            })
+            .collect();
+
+        // Sort projects by most recent session timestamp (descending - most recent first)
+        projects.sort_by(|a, b| {
+            let a_timestamp = a
+                .session_indices
+                .first()
+                .and_then(|&idx| sessions.get(idx))
+                .map(|s| s.timestamp.as_str())
+                .unwrap_or("");
+            let b_timestamp = b
+                .session_indices
+                .first()
+                .and_then(|&idx| sessions.get(idx))
+                .map(|s| s.timestamp.as_str())
+                .unwrap_or("");
+            // Reverse order for most recent first
+            b_timestamp.cmp(a_timestamp)
+        });
+
+        projects
+    }
 }
 
 impl App {
@@ -166,17 +433,19 @@ impl App {
 
         let config_snapshot = config::current();
         let write_output_artifacts = config_snapshot.write_output_artifacts;
+        let ai_provider = config_snapshot.ai_provider;
         let openai_model = config_snapshot.openai_model;
+        let anthropic_model = config_snapshot.anthropic_model;
+        let openrouter_model = config_snapshot.openrouter_model.clone();
+        let resolved_llm = config_snapshot.resolved_llm();
         let session_manager = SessionManager::from_source(config_snapshot.session_source);
         let session_load = session_manager.load_today_events();
 
-        let openai_key = config_snapshot.openai_api_key.clone();
-        let ai_manager = if openai_key.trim().is_empty() {
+        let learning_generator = if resolved_llm.api_key.trim().is_empty() {
             None
         } else {
-            match AiManager::from_config("output", openai_model.as_model_name(), openai_key.clone())
-            {
-                Ok(manager) => Some(manager),
+            match LearningGenerator::from_config(resolved_llm.clone(), "output") {
+                Ok(generator) => Some(generator),
                 Err(err) => {
                     Self::push_error(&mut aggregated_error, format!("AI unavailable: {}", err));
                     None
@@ -190,6 +459,9 @@ impl App {
             menu_index: 0,
             events: Vec::new(),
             selected_event: None,
+            sessions: Vec::new(),
+            selected_session: None,
+            viewing_sessions_list: true,
             session_dir: PathBuf::new(),
             session_date: String::new(),
             session_source: String::new(),
@@ -197,10 +469,14 @@ impl App {
             summary_file: None,
             summary_content: None,
             error: None,
-            ai_manager,
+            ai_provider,
+            learning_generator,
             ai_status: None,
             ai_loading: false,
             ai_loading_frame: 0,
+            ai_loading_start: None,
+            ai_progress_percent: 0,
+            ai_progress_message: String::new(),
             ai_result_receiver: None,
             learning_response: None,
             learning_group_index: 0,
@@ -209,15 +485,32 @@ impl App {
             learning_feedback: None,
             learning_summary_revealed: false,
             learning_waiting_for_next: false,
+            learning_selecting_session: false,
+            learning_selected_session: None,
+            projects: Vec::new(),
+            learning_selected_project: None,
+            learning_viewing_projects: true,
             config_form: ConfigForm::from_config(config_snapshot.clone()),
             write_output_artifacts,
             openai_model,
+            anthropic_model,
+            openrouter_model,
+            quiz_first_attempts: HashSet::new(),
+            quiz_first_attempt_results: std::collections::HashMap::new(),
+            analytics_snapshot: None,
+            analytics_error: None,
+            analytics_refreshed_at: None,
+            last_event_timestamp: None,
+            last_quiz_event_timestamp: None,
+            learning_showing_summary: false,
+            quiz_summary_results: Vec::new(),
         };
 
         app.apply_session_load(session_load);
 
-        if app.ai_manager.is_none() && openai_key.trim().is_empty() {
-            app.ai_status = Some(OPENAI_KEY_HELP.to_string());
+        // Set appropriate help message if API key is not configured
+        if app.learning_generator.is_none() && resolved_llm.api_key.trim().is_empty() {
+            app.ai_status = Some(ai_provider.missing_key_help().to_string());
         } else {
             app.ai_status = None;
         }
@@ -271,25 +564,36 @@ impl App {
         if let Some(summary_error) = artifact.error {
             Self::push_error(&mut self.error, summary_error);
         }
+
+        self.last_event_timestamp = self.events.last().map(|event| event.timestamp.clone());
     }
 
     pub(crate) fn reload_session_from_config(&mut self) {
         let config_snapshot = config::current();
         self.write_output_artifacts = config_snapshot.write_output_artifacts;
+        self.ai_provider = config_snapshot.ai_provider;
         self.openai_model = config_snapshot.openai_model;
-        if config_snapshot.openai_api_key.trim().is_empty() {
-            self.ai_manager = None;
-            App::push_error(&mut self.error, OPENAI_KEY_HELP.to_string());
-            self.ai_status = Some(OPENAI_KEY_HELP.to_string());
+        self.anthropic_model = config_snapshot.anthropic_model;
+        self.openrouter_model = config_snapshot.openrouter_model.clone();
+        let resolved_llm = config_snapshot.resolved_llm();
+
+        if resolved_llm.api_key.trim().is_empty() {
+            self.learning_generator = None;
+            let help = self.ai_provider.missing_key_help().to_string();
+            App::push_error(&mut self.error, help.clone());
+            self.ai_status = Some(help);
         } else {
-            let key = config_snapshot.openai_api_key.clone();
-            self.ai_manager =
-                AiManager::from_config("output", self.openai_model.as_model_name(), key).ok();
+            self.learning_generator = LearningGenerator::from_config(resolved_llm, "output").ok();
             self.ai_status = None;
         }
+
         let manager = SessionManager::from_source(config_snapshot.session_source);
         let load = manager.load_today_events();
         self.apply_session_load(load);
+
+        // Clear cached sessions so they reload with new source next time
+        self.sessions.clear();
+        self.selected_session = None;
     }
 
     /// Reads the crossterm events and updates the state of [`App`].
@@ -326,6 +630,7 @@ impl App {
                 AppView::Events => MenuManager::new(self).handle_events_key(key),
                 AppView::Learning => LearningManager::new(self).handle_key(key),
                 AppView::Config => ConfigManager::new(self).handle_key(key),
+                AppView::Analytics => AnalyticsManager::new(self).handle_key(key),
             },
         }
     }
@@ -334,6 +639,10 @@ impl App {
         if matches!(self.view, AppView::Config) {
             self.config_form = ConfigForm::from_config(config::current());
         }
+        self.learning_showing_summary = false;
+        self.learning_selecting_session = false;
+        self.learning_viewing_projects = true;
+        self.quiz_summary_results.clear();
         self.view = AppView::Menu;
     }
 
@@ -350,5 +659,142 @@ impl App {
         } else {
             *slot = Some(message);
         }
+    }
+
+    pub(crate) fn record_quiz_first_attempt(
+        &mut self,
+        group_index: usize,
+        question_index: usize,
+        correct: bool,
+    ) {
+        if !self
+            .quiz_first_attempts
+            .insert((group_index, question_index))
+        {
+            return;
+        }
+        // Track the first-try result for summary screen
+        self.quiz_first_attempt_results
+            .insert((group_index, question_index), correct);
+
+        let Some(response) = self.learning_response.as_ref() else {
+            crate::log_util::log_debug(
+                "App: cannot record quiz attempt because no learning response is loaded",
+            );
+            return;
+        };
+        let Some(group) = response.response.get(group_index) else {
+            crate::log_util::log_debug(&format!(
+                "App: quiz attempt group index {} out of bounds",
+                group_index
+            ));
+            return;
+        };
+        let Some(question) = group.quiz.get(question_index) else {
+            crate::log_util::log_debug(&format!(
+                "App: quiz attempt question index {} out of bounds for group {}",
+                question_index, group_index
+            ));
+            return;
+        };
+
+        let language = if group.knowledge_type_language.trim().is_empty() {
+            None
+        } else {
+            Some(group.knowledge_type_language.as_str())
+        };
+
+        match crate::knowledge_store::record_quiz_first_attempt(
+            &self.session_date,
+            &group.knowledge_type_group,
+            language,
+            &question.question,
+            correct,
+        ) {
+            Ok(_) => {
+                crate::log_util::log_debug(&format!(
+                    "App: recorded first attempt for '{}' (correct: {})",
+                    question.question, correct
+                ));
+                self.analytics_snapshot = None;
+                self.analytics_refreshed_at = None;
+            }
+            Err(err) => {
+                Self::push_error(
+                    &mut self.error,
+                    format!("Failed to record quiz attempt: {}", err),
+                );
+                crate::log_util::log_debug(&format!(
+                    "App: failed to persist quiz attempt for '{}': {}",
+                    question.question, err
+                ));
+            }
+        }
+    }
+
+    pub(crate) fn sync_new_session_events(&mut self) -> Result<(), String> {
+        if self.last_quiz_event_timestamp.is_none() {
+            return Ok(());
+        }
+
+        let baseline = self
+            .last_quiz_event_timestamp
+            .as_deref()
+            .expect("last_quiz_event_timestamp checked to be Some");
+        let config_snapshot = config::current();
+        let manager = SessionManager::from_source(config_snapshot.session_source);
+        let load = manager.load_new_events(self.latest_file.as_deref(), Some(baseline));
+
+        if load.events.is_empty() {
+            let message = load.error.unwrap_or_else(|| {
+                "No new session events available yet. Run another coding session before generating a new quiz.".to_string()
+            });
+            return Err(message);
+        }
+
+        let mut combined_events = self.events.clone();
+        combined_events.extend(load.events.iter().cloned());
+
+        let mut merged_load = load;
+        merged_load.events = combined_events;
+        if merged_load.latest_file.is_none() {
+            merged_load.latest_file = self.latest_file.clone();
+        }
+
+        self.apply_session_load(merged_load);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_cli_options_supports_debug_flag_without_command() {
+        let options = parse_cli_options(&args(&["--debug"])).unwrap();
+        assert!(options.debug_logging);
+        assert!(options.command.is_none());
+    }
+
+    #[test]
+    fn parse_cli_options_supports_debug_flag_with_command() {
+        let options =
+            parse_cli_options(&args(&["--debug", "--set-openai-key", "secret-key"])).unwrap();
+        assert!(options.debug_logging);
+        assert_eq!(
+            options.command,
+            Some(CliCommand::SetOpenAiKey("secret-key".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_cli_options_rejects_multiple_commands() {
+        let error = parse_cli_options(&args(&["--help", "--version"])).unwrap_err();
+        assert!(error.contains("Multiple commands"));
     }
 }
