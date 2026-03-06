@@ -1,6 +1,7 @@
 .env
 /output
 /dist
+node_modules/
 bin/learnchain
 .DS_Store
 config/app_config.toml
