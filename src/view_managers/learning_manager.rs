@@ -1,9 +1,11 @@
 use super::events_manager::EventsManager;
 use crate::{
-    App, AppView,
-    ai_manager::{self, StructuredLearningResponse},
+    App, AppView, QuizSummaryResult, config,
+    llm::{self, StructuredLearningResponse},
     log_util::log_debug,
+    output_manager::OutputManager,
     reset_learning_feedback,
+    session_manager::SessionManager,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rand::{rng, seq::SliceRandom};
@@ -34,6 +36,230 @@ impl<'a> LearningManager<'a> {
         }
     }
 
+    /// Enter session selection mode for learning lesson generation.
+    pub(crate) fn show_session_selection(app: &mut App) {
+        use crate::Project;
+
+        app.view = AppView::Learning;
+        app.learning_selecting_session = true;
+        app.learning_viewing_projects = true;
+
+        // Load all sessions if not already loaded
+        if app.sessions.is_empty() {
+            let config_snapshot = config::current();
+            let manager = SessionManager::from_source(config_snapshot.session_source);
+            let load = manager.load_all_sessions();
+            app.sessions = load.sessions;
+            if let Some(err) = load.error {
+                App::push_error(&mut app.error, err);
+            }
+        }
+
+        // Group sessions into projects
+        app.projects = Project::group_sessions(&app.sessions);
+
+        // Initialize project selection
+        if app.projects.is_empty() {
+            app.learning_selected_project = None;
+        } else if app.learning_selected_project.is_none() {
+            app.learning_selected_project = Some(0);
+        }
+
+        log_debug("App: opened learning project selection view");
+    }
+
+    /// Handle key events in session selection mode.
+    fn handle_session_selection_key(&mut self, key: KeyEvent) {
+        if self.app.learning_viewing_projects {
+            self.handle_project_selection_key(key);
+        } else {
+            self.handle_session_in_project_key(key);
+        }
+    }
+
+    /// Handle key events when viewing the project list.
+    fn handle_project_selection_key(&mut self, key: KeyEvent) {
+        match (key.modifiers, key.code) {
+            (KeyModifiers::NONE, KeyCode::Down | KeyCode::Char('j')) => self.select_next_project(),
+            (KeyModifiers::NONE, KeyCode::Up | KeyCode::Char('k')) => {
+                self.select_previous_project()
+            }
+            (KeyModifiers::NONE, KeyCode::Enter) => self.drill_into_project(),
+            (KeyModifiers::NONE, KeyCode::Backspace | KeyCode::Char('m')) => {
+                self.app.return_to_menu()
+            }
+            _ => {}
+        }
+    }
+
+    /// Handle key events when viewing sessions within a project.
+    fn handle_session_in_project_key(&mut self, key: KeyEvent) {
+        match (key.modifiers, key.code) {
+            (KeyModifiers::NONE, KeyCode::Down | KeyCode::Char('j')) => {
+                self.select_next_session_in_project()
+            }
+            (KeyModifiers::NONE, KeyCode::Up | KeyCode::Char('k')) => {
+                self.select_previous_session_in_project()
+            }
+            (KeyModifiers::NONE, KeyCode::Enter) => self.generate_from_selected_session(),
+            (KeyModifiers::NONE, KeyCode::Backspace) => self.go_back_to_projects(),
+            (KeyModifiers::NONE, KeyCode::Char('m')) => self.app.return_to_menu(),
+            _ => {}
+        }
+    }
+
+    fn select_next_project(&mut self) {
+        if self.app.projects.is_empty() {
+            self.app.learning_selected_project = None;
+            return;
+        }
+        let next = match self.app.learning_selected_project {
+            Some(index) if index + 1 < self.app.projects.len() => index + 1,
+            _ => 0,
+        };
+        self.app.learning_selected_project = Some(next);
+    }
+
+    fn select_previous_project(&mut self) {
+        if self.app.projects.is_empty() {
+            self.app.learning_selected_project = None;
+            return;
+        }
+        let previous = match self.app.learning_selected_project {
+            Some(index) if index > 0 => index - 1,
+            _ => self.app.projects.len() - 1,
+        };
+        self.app.learning_selected_project = Some(previous);
+    }
+
+    fn drill_into_project(&mut self) {
+        let Some(project_idx) = self.app.learning_selected_project else {
+            return;
+        };
+        let Some(project) = self.app.projects.get(project_idx) else {
+            return;
+        };
+        if project.session_indices.is_empty() {
+            App::push_error(
+                &mut self.app.error,
+                "No sessions in this project.".to_string(),
+            );
+            return;
+        }
+
+        // Set the first session in this project as selected
+        self.app.learning_selected_session = Some(0);
+        self.app.learning_viewing_projects = false;
+        log_debug(&format!(
+            "App: drilled into project '{}' with {} sessions",
+            project.name,
+            project.session_indices.len()
+        ));
+    }
+
+    fn go_back_to_projects(&mut self) {
+        self.app.learning_viewing_projects = true;
+        self.app.learning_selected_session = None;
+        log_debug("App: returned to project list");
+    }
+
+    /// Get sessions for the currently selected project.
+    fn current_project_sessions(&self) -> Vec<&crate::session_sources::Session> {
+        let Some(project_idx) = self.app.learning_selected_project else {
+            return Vec::new();
+        };
+        let Some(project) = self.app.projects.get(project_idx) else {
+            return Vec::new();
+        };
+        project
+            .session_indices
+            .iter()
+            .filter_map(|&idx| self.app.sessions.get(idx))
+            .collect()
+    }
+
+    fn select_next_session_in_project(&mut self) {
+        let sessions = self.current_project_sessions();
+        if sessions.is_empty() {
+            self.app.learning_selected_session = None;
+            return;
+        }
+        let next = match self.app.learning_selected_session {
+            Some(index) if index + 1 < sessions.len() => index + 1,
+            _ => 0,
+        };
+        self.app.learning_selected_session = Some(next);
+    }
+
+    fn select_previous_session_in_project(&mut self) {
+        let sessions = self.current_project_sessions();
+        if sessions.is_empty() {
+            self.app.learning_selected_session = None;
+            return;
+        }
+        let previous = match self.app.learning_selected_session {
+            Some(index) if index > 0 => index - 1,
+            _ => sessions.len() - 1,
+        };
+        self.app.learning_selected_session = Some(previous);
+    }
+
+    /// Generate quiz from the selected session within the current project.
+    fn generate_from_selected_session(&mut self) {
+        let Some(project_idx) = self.app.learning_selected_project else {
+            App::push_error(&mut self.app.error, "No project selected.".to_string());
+            return;
+        };
+        let Some(project) = self.app.projects.get(project_idx) else {
+            App::push_error(&mut self.app.error, "Project not found.".to_string());
+            return;
+        };
+        let Some(session_idx_in_project) = self.app.learning_selected_session else {
+            App::push_error(&mut self.app.error, "No session selected.".to_string());
+            return;
+        };
+        let Some(&global_session_idx) = project.session_indices.get(session_idx_in_project) else {
+            App::push_error(
+                &mut self.app.error,
+                "Selected session not found in project.".to_string(),
+            );
+            return;
+        };
+        let Some(session) = self.app.sessions.get(global_session_idx) else {
+            App::push_error(
+                &mut self.app.error,
+                "Selected session not found.".to_string(),
+            );
+            return;
+        };
+
+        if session.events.is_empty() {
+            App::push_error(
+                &mut self.app.error,
+                "Selected session has no events. Choose a different session.".to_string(),
+            );
+            return;
+        }
+
+        // Generate summary content from the selected session's events
+        let output_manager = OutputManager::new();
+        let artifact = output_manager.write_markdown_summary(
+            &session.events,
+            &session.date,
+            Some(session.source_file.as_path()),
+            false, // Don't persist to disk
+        );
+
+        // Store the summary content for AI generation
+        self.app.summary_content = Some(artifact.content);
+
+        // Exit session selection mode
+        self.app.learning_selecting_session = false;
+
+        // Trigger the AI generation
+        llm::trigger_learning_response_skip_sync(self.app);
+    }
+
     pub(crate) fn shuffle_quiz_options(response: &mut StructuredLearningResponse) {
         let mut rng = rng();
         for group in &mut response.response {
@@ -44,6 +270,18 @@ impl<'a> LearningManager<'a> {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) {
+        // Handle session selection mode
+        if self.app.learning_selecting_session {
+            self.handle_session_selection_key(key);
+            return;
+        }
+
+        // If showing summary screen, any key returns to menu
+        if self.app.learning_showing_summary {
+            self.app.return_to_menu();
+            return;
+        }
+
         if self.app.learning_waiting_for_next {
             self.app.learning_waiting_for_next = false;
             self.next_question();
@@ -71,7 +309,7 @@ impl<'a> LearningManager<'a> {
             | (KeyModifiers::NONE, KeyCode::Char(' '))
             | (KeyModifiers::NONE, KeyCode::Char('s')) => self.select_option(),
             (KeyModifiers::NONE, KeyCode::Char('r')) | (KeyModifiers::NONE, KeyCode::Char('R')) => {
-                ai_manager::trigger_learning_response(self.app)
+                llm::trigger_learning_response(self.app)
             }
             (KeyModifiers::NONE, KeyCode::Char('m')) => self.app.return_to_menu(),
             (KeyModifiers::NONE, KeyCode::Char('e')) => EventsManager::show_events(self.app),
@@ -185,6 +423,12 @@ impl<'a> LearningManager<'a> {
     }
 
     pub(crate) fn next_question(&mut self) {
+        // Check if all questions have been answered - if so, show summary
+        if self.all_questions_answered() {
+            self.on_quiz_complete();
+            return;
+        }
+
         if let Some(quiz_len) = self.active_group_quiz_len() {
             if self.app.learning_quiz_index + 1 < quiz_len {
                 self.app.learning_quiz_index += 1;
@@ -206,6 +450,26 @@ impl<'a> LearningManager<'a> {
         }
 
         self.on_quiz_complete();
+    }
+
+    fn all_questions_answered(&self) -> bool {
+        let Some(response) = self.app.learning_response.as_ref() else {
+            return true;
+        };
+
+        for (group_index, group) in response.response.iter().enumerate() {
+            for question_index in 0..group.quiz.len() {
+                if !self
+                    .app
+                    .quiz_first_attempts
+                    .contains(&(group_index, question_index))
+                {
+                    return false;
+                }
+            }
+        }
+
+        true
     }
 
     pub(crate) fn previous_question(&mut self) {
@@ -371,12 +635,46 @@ impl<'a> LearningManager<'a> {
 
     fn on_quiz_complete(&mut self) {
         self.reset_feedback();
+        self.build_quiz_summary();
+        self.app.learning_showing_summary = true;
         self.app.learning_summary_revealed = true;
         self.app.learning_waiting_for_next = false;
-        self.app.learning_feedback = Some(
-            "You answered every question in the current lesson! Press g to generate new questions or m to return to the menu.".to_string(),
-        );
-        log_debug("App: user completed all quiz questions");
+        self.app.learning_feedback = None;
+        log_debug("App: user completed all quiz questions, showing summary");
+    }
+
+    fn build_quiz_summary(&mut self) {
+        self.app.quiz_summary_results.clear();
+
+        let Some(response) = self.app.learning_response.as_ref() else {
+            return;
+        };
+
+        for (group_index, group) in response.response.iter().enumerate() {
+            for (question_index, quiz_item) in group.quiz.iter().enumerate() {
+                // Find the correct answer
+                let correct_answer = quiz_item
+                    .options
+                    .iter()
+                    .find(|opt| opt.is_correct_answer)
+                    .map(|opt| opt.selection.clone())
+                    .unwrap_or_else(|| "No correct answer defined".to_string());
+
+                // Check if this question was answered correctly on first try
+                let first_try_correct = self
+                    .app
+                    .quiz_first_attempt_results
+                    .get(&(group_index, question_index))
+                    .copied()
+                    .unwrap_or(false);
+
+                self.app.quiz_summary_results.push(QuizSummaryResult {
+                    question: quiz_item.question.clone(),
+                    correct_answer,
+                    first_try_correct,
+                });
+            }
+        }
     }
 
     fn move_to_previous_group_with_quiz(&mut self) -> bool {
@@ -427,8 +725,8 @@ impl<'a> LearningManager<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai_manager::{KnowledgeResponse, QuizItem, QuizOption};
-    use crate::config::{AppConfig, ConfigForm, OpenAiModelKind};
+    use crate::config::{AiProvider, AnthropicModelKind, AppConfig, ConfigForm, OpenAiModelKind};
+    use crate::llm::types::{KnowledgeResponse, QuizItem, QuizOption};
     use serde_json::from_str;
     use std::{
         collections::HashSet,
@@ -456,6 +754,9 @@ mod tests {
             menu_index: 0,
             events: Vec::new(),
             selected_event: None,
+            sessions: Vec::new(),
+            selected_session: None,
+            viewing_sessions_list: true,
             session_dir: PathBuf::new(),
             session_date: String::new(),
             session_source: String::new(),
@@ -463,10 +764,14 @@ mod tests {
             summary_file: None,
             summary_content: None,
             error: None,
-            ai_manager: None,
+            ai_provider: AiProvider::OpenAI,
+            learning_generator: None,
             ai_status: None,
             ai_loading: false,
             ai_loading_frame: 0,
+            ai_loading_start: None,
+            ai_progress_percent: 0,
+            ai_progress_message: String::new(),
             ai_result_receiver: None,
             learning_response: Some(response),
             learning_group_index: 0,
@@ -475,13 +780,25 @@ mod tests {
             learning_feedback: None,
             learning_summary_revealed: false,
             learning_waiting_for_next: false,
+            learning_selecting_session: false,
+            learning_selected_session: None,
+            projects: Vec::new(),
+            learning_selected_project: None,
+            learning_viewing_projects: true,
             config_form: ConfigForm::from_config(AppConfig::default()),
             write_output_artifacts: false,
             openai_model: OpenAiModelKind::Gpt5Mini,
+            anthropic_model: AnthropicModelKind::ClaudeSonnet4,
+            openrouter_model: String::new(),
             quiz_first_attempts: HashSet::new(),
+            quiz_first_attempt_results: std::collections::HashMap::new(),
             analytics_snapshot: None,
             analytics_error: None,
             analytics_refreshed_at: None,
+            last_event_timestamp: None,
+            last_quiz_event_timestamp: None,
+            learning_showing_summary: false,
+            quiz_summary_results: Vec::new(),
         }
     }
 
