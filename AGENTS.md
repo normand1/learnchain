@@ -3,7 +3,7 @@
 Use this playbook to keep LearnChain's GenAI TUI predictable, debuggable, and easy to extend.
 
 ## Project Structure & Module Organization
-The entry point lives in `src/main.rs`, which wires app state, views, and async workers; related helpers sit beside it (`src/config.rs`, `src/ai_manager.rs`, `src/markdown_rules.rs`). Persisted user settings are stored in `config/app_config.toml`; treat the config module as the single interface for load/save logic and default fallbacks. Keep integration fixtures under `tests/` and `tests/fixtures/`, runtime artefacts in `output/`, and reusable CLI helpers in `scripts/`. Reference runtime assets from `assets/` with workspace-relative paths so `cargo run` succeeds from the repo root.
+The entry point lives in `src/main.rs`, which wires app state, views, and async workers; related helpers sit beside it (`src/config.rs`, `src/ai_manager.rs`, `src/markdown_rules.rs`). Session parsing is modularized in `src/session_sources/` with separate implementations for each coding agent (Codex CLI in `codex.rs`, Claude Code in `claude.rs`), sharing common types via the `SessionSource` trait in `mod.rs`. The `session_manager.rs` orchestrates loading across these sources. Persisted user settings are stored in `config/app_config.toml`; treat the config module as the single interface for load/save logic and default fallbacks. Keep integration fixtures under `tests/` and `tests/fixtures/`, runtime artefacts in `output/`, and reusable CLI helpers in `scripts/`. Reference runtime assets from `assets/` with workspace-relative paths so `cargo run` succeeds from the repo root.
 
 ## Build, Test, and Development Commands
 - `cargo build` — compile the TUI and verify that the dependency graph is coherent.

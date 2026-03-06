@@ -2,7 +2,7 @@ use super::{
     analytics_manager::AnalyticsManager, config_manager::ConfigManager,
     events_manager::EventsManager, learning_manager::LearningManager,
 };
-use crate::{App, ai_manager};
+use crate::App;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 pub(crate) const MENU_OPTIONS: [&str; 4] = [
@@ -58,6 +58,13 @@ impl<'a> MenuManager<'a> {
             (KeyModifiers::NONE, KeyCode::Up | KeyCode::Char('k')) => {
                 EventsManager::new(self.app).select_previous()
             }
+            (KeyModifiers::NONE, KeyCode::Enter) => EventsManager::new(self.app).drill_down(),
+            (KeyModifiers::NONE, KeyCode::Backspace) => {
+                let went_back = EventsManager::new(self.app).go_back();
+                if !went_back {
+                    self.app.return_to_menu();
+                }
+            }
             (KeyModifiers::NONE, KeyCode::Char('m')) => self.app.return_to_menu(),
             (KeyModifiers::NONE, KeyCode::Char('l')) => LearningManager::show_learning(self.app),
             _ => {}
@@ -78,7 +85,7 @@ impl<'a> MenuManager<'a> {
 
     fn activate_menu_option(&mut self) {
         match self.app.menu_index {
-            0 => ai_manager::trigger_learning_response(self.app),
+            0 => LearningManager::show_session_selection(self.app),
             1 => AnalyticsManager::show_analytics(self.app),
             2 => EventsManager::show_events(self.app),
             3 => ConfigManager::new(self.app).show_config(),

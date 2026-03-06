@@ -8,7 +8,7 @@ use color_eyre::eyre::{Context, Result, eyre};
 use rusqlite::{Connection, params};
 use std::collections::{BTreeSet, HashMap};
 
-use crate::{ai_manager::StructuredLearningResponse, output_manager::OutputManager};
+use crate::{llm::StructuredLearningResponse, output_manager::OutputManager};
 
 const DATABASE_FILENAME: &str = "learning_history.sqlite";
 
@@ -384,7 +384,7 @@ fn connection_for_path(db_path: &Path) -> Result<Connection> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai_manager::{KnowledgeResponse, QuizItem, QuizOption, StructuredLearningResponse};
+    use crate::llm::types::{KnowledgeResponse, QuizItem, QuizOption, StructuredLearningResponse};
     use chrono::{Duration, Utc};
     use std::{fs, time::SystemTime};
 
