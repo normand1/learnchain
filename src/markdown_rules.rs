@@ -1,4 +1,4 @@
-use crate::{config, session_manager::SessionEvent};
+use crate::{config, session_sources::SessionEvent};
 
 const EXECUTION_ERROR_PREFIX: &str = "execution error:";
 const OPERATION_NOT_PERMITTED_PHRASE: &str = "operation not permitted";
@@ -6,12 +6,15 @@ const OPERATION_NOT_PERMITTED_PHRASE: &str = "operation not permitted";
 #[derive(Debug, Clone, Copy)]
 pub struct MarkdownRules {
     max_events: usize,
+    sampling_percentage: u8,
 }
 
 impl Default for MarkdownRules {
     fn default() -> Self {
+        let config = config::current();
         Self {
-            max_events: config::default_max_events(),
+            max_events: config.default_max_events,
+            sampling_percentage: config.sampling_percentage,
         }
     }
 }
@@ -20,7 +23,10 @@ impl MarkdownRules {
     /// Create new rules with a custom maximum number of events.
     #[allow(dead_code)]
     pub fn with_max_events(max_events: usize) -> Self {
-        Self { max_events }
+        Self {
+            max_events,
+            sampling_percentage: 100,
+        }
     }
 
     /// Determines whether a single event should appear in the markdown output.
@@ -29,13 +35,34 @@ impl MarkdownRules {
     }
 
     /// Return up to `max_events` of the most recent entries that satisfy [`Self::should_include_event`].
+    /// If sampling_percentage < 100, randomly sample that percentage of eligible events.
     pub fn select_events<'a>(&self, events: &'a [SessionEvent]) -> Vec<&'a SessionEvent> {
-        let mut selected: Vec<&SessionEvent> = events
+        let eligible: Vec<&SessionEvent> = events
             .iter()
-            .rev()
             .filter(|event| self.should_include_event(event))
-            .take(self.max_events)
             .collect();
+
+        // Apply sampling if less than 100%
+        let sampled = if self.sampling_percentage < 100 && !eligible.is_empty() {
+            let target_count = (eligible.len() * self.sampling_percentage as usize / 100).max(1);
+
+            // Use deterministic sampling: take evenly spaced events
+            let step = eligible.len() as f64 / target_count as f64;
+            let mut result = Vec::with_capacity(target_count);
+            for i in 0..target_count {
+                let index = (i as f64 * step) as usize;
+                if index < eligible.len() {
+                    result.push(eligible[index]);
+                }
+            }
+            result
+        } else {
+            eligible
+        };
+
+        // Take only the most recent up to max_events
+        let mut selected: Vec<&SessionEvent> =
+            sampled.into_iter().rev().take(self.max_events).collect();
 
         selected.reverse();
         selected
@@ -44,6 +71,12 @@ impl MarkdownRules {
     /// Expose the configured maximum count for callers that need to inspect it.
     pub fn max_events(&self) -> usize {
         self.max_events
+    }
+
+    /// Expose the configured sampling percentage for callers that need to inspect it.
+    #[allow(dead_code)]
+    pub fn sampling_percentage(&self) -> u8 {
+        self.sampling_percentage
     }
 }
 

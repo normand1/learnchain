@@ -1,4 +1,4 @@
-use crate::{markdown_rules::MarkdownRules, session_manager::SessionEvent};
+use crate::{markdown_rules::MarkdownRules, session_sources::SessionEvent};
 use std::{
     env, fs,
     path::{Path, PathBuf},
