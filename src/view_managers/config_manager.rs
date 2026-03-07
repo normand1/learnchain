@@ -17,7 +17,7 @@ impl<'a> ConfigManager<'a> {
     pub(crate) fn show_config(&mut self) {
         self.app.config_form = ConfigForm::from_config(config::current());
         self.app.config_form.set_status(
-            "Use ←/→ to adjust values or cycle repository/provider/model. Select a text field and press Enter to edit. For Notion, enter the destination database/page ID or full URL. For LearnChain, set the site URL plus your email/password after signing up at /login. s saves; m saves and returns.",
+            "Config is grouped by section. Use ↑/↓ to focus a setting, ←/→ to adjust selectors, and Enter to edit text fields.",
         );
         self.app.view = AppView::Config;
     }

@@ -464,6 +464,35 @@ pub(crate) enum ConfigField {
     OpenRouterKey,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigSection {
+    Session,
+    Export,
+    Ai,
+}
+
+impl ConfigSection {
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::Session => "Session Setup",
+            Self::Export => "Export & Publishing",
+            Self::Ai => "AI Generation",
+        }
+    }
+
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            Self::Session => {
+                "Choose what session data LearnChain loads and how much context it keeps."
+            }
+            Self::Export => "Control saved artifacts and optional document repository publishing.",
+            Self::Ai => {
+                "Pick the provider, model, and credentials used for quizzes and deep dives."
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfigForm {
     pub(crate) max_events: usize,
@@ -637,9 +666,46 @@ impl ConfigForm {
         fields
     }
 
-    pub(crate) fn selected_index(&self) -> usize {
-        let visible = self.visible_fields();
-        visible.iter().position(|f| *f == self.field).unwrap_or(0)
+    pub(crate) fn section_for_field(field: ConfigField) -> ConfigSection {
+        match field {
+            ConfigField::MaxEvents
+            | ConfigField::MinQuiz
+            | ConfigField::SamplingPercentage
+            | ConfigField::SessionSource => ConfigSection::Session,
+            ConfigField::OutputArtifacts
+            | ConfigField::DocumentRepository
+            | ConfigField::DocumentRepositoryTarget
+            | ConfigField::NotionApiToken
+            | ConfigField::LearnChainSiteUrl
+            | ConfigField::LearnChainEmail
+            | ConfigField::LearnChainPassword => ConfigSection::Export,
+            ConfigField::AiProvider
+            | ConfigField::OpenAiModel
+            | ConfigField::OpenAiKey
+            | ConfigField::AnthropicModel
+            | ConfigField::AnthropicKey
+            | ConfigField::OpenRouterModel
+            | ConfigField::OpenRouterKey => ConfigSection::Ai,
+        }
+    }
+
+    pub(crate) fn visible_fields_in_section(&self, section: ConfigSection) -> Vec<ConfigField> {
+        self.visible_fields()
+            .into_iter()
+            .filter(|field| Self::section_for_field(*field) == section)
+            .collect()
+    }
+
+    pub(crate) fn selected_section(&self) -> ConfigSection {
+        Self::section_for_field(self.field)
+    }
+
+    pub(crate) fn selected_index_in_section(&self) -> usize {
+        let visible = self.visible_fields_in_section(self.selected_section());
+        visible
+            .iter()
+            .position(|field| *field == self.field)
+            .unwrap_or(0)
     }
 
     pub(crate) fn select_next(&mut self) {
@@ -1708,6 +1774,56 @@ mod tests {
                 ConfigField::OpenAiKey,
             ]
         );
+    }
+
+    #[test]
+    fn config_form_groups_fields_into_sections() {
+        let form = ConfigForm::from_config(AppConfig {
+            document_repository: DocumentRepositoryKind::Notion,
+            ai_provider: AiProvider::OpenRouter,
+            openrouter_model: "openrouter/model".to_string(),
+            ..AppConfig::default()
+        });
+
+        assert_eq!(
+            form.visible_fields_in_section(ConfigSection::Session),
+            vec![
+                ConfigField::MaxEvents,
+                ConfigField::MinQuiz,
+                ConfigField::SamplingPercentage,
+                ConfigField::SessionSource,
+            ]
+        );
+        assert_eq!(
+            form.visible_fields_in_section(ConfigSection::Export),
+            vec![
+                ConfigField::OutputArtifacts,
+                ConfigField::DocumentRepository,
+                ConfigField::DocumentRepositoryTarget,
+                ConfigField::NotionApiToken,
+            ]
+        );
+        assert_eq!(
+            form.visible_fields_in_section(ConfigSection::Ai),
+            vec![
+                ConfigField::AiProvider,
+                ConfigField::OpenRouterModel,
+                ConfigField::OpenRouterKey,
+            ]
+        );
+    }
+
+    #[test]
+    fn config_form_selected_section_tracks_current_field() {
+        let mut form = ConfigForm::from_config(AppConfig::default());
+
+        form.field = ConfigField::DocumentRepository;
+        assert_eq!(form.selected_section(), ConfigSection::Export);
+        assert_eq!(form.selected_index_in_section(), 1);
+
+        form.field = ConfigField::OpenAiKey;
+        assert_eq!(form.selected_section(), ConfigSection::Ai);
+        assert_eq!(form.selected_index_in_section(), 2);
     }
 
     #[test]

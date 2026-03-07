@@ -1880,216 +1880,576 @@ impl<'a> UiRenderer<'a> {
 
     fn render_config(&mut self, frame: &mut Frame) {
         let app = &mut *self.app;
+        let active_section = app.config_form.selected_section();
+        let current_field = app.config_form.current_field();
+        let fields_in_section = app.config_form.visible_fields_in_section(active_section);
 
         let layout = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(3)])
+            .constraints([
+                Constraint::Length(4),
+                Constraint::Min(12),
+                Constraint::Length(6),
+            ])
             .split(frame.area());
 
-        // Build items list dynamically based on provider
-        let mut items = vec![
-            ListItem::new(format!(
-                "Default max events (markdown summaries): {}",
-                app.config_form.max_events
-            )),
-            ListItem::new(format!(
-                "Minimum quiz questions (AI prompt): {}",
-                app.config_form.min_quiz_questions
-            )),
-            ListItem::new(format!(
-                "Event sampling % (quiz generation): {}%",
-                app.config_form.sampling_percentage
-            )),
-            ListItem::new(format!(
-                "Session source: {}",
-                app.config_form.session_source.label()
-            )),
-            ListItem::new(format!(
-                "Write quiz artifacts to output: {}",
-                if app.config_form.write_output_artifacts {
-                    "Enabled"
-                } else {
-                    "Disabled"
-                }
-            )),
-            ListItem::new(format!(
-                "Document repository: {}",
-                app.config_form.document_repository.label()
-            )),
-            ListItem::new(format!(
-                "AI Provider: {}",
-                app.config_form.ai_provider.label()
-            )),
-        ];
-
-        match app.config_form.document_repository {
-            config::DocumentRepositoryKind::None => {}
-            config::DocumentRepositoryKind::Notion => {
-                items.insert(
-                    6,
-                    ListItem::new(if app.config_form.is_editing_document_repository_target() {
-                        format!(
-                            "Notion destination (database/page ID or URL, editing): {}",
-                            app.config_form.document_repository_target_buffer()
-                        )
-                    } else if app.config_form.document_repository_target.is_empty() {
-                        "Notion destination (database/page ID or URL): <not set>".to_string()
-                    } else {
-                        format!(
-                            "Notion destination (database/page ID or URL): {}",
-                            app.config_form.document_repository_target
-                        )
-                    }),
-                );
-                items.insert(
-                    7,
-                    ListItem::new(if app.config_form.is_editing_notion_api_token() {
-                        format!(
-                            "Notion API token (editing): {}",
-                            app.config_form.masked_notion_api_token_buffer()
-                        )
-                    } else {
-                        format!(
-                            "Notion API token: {}",
-                            app.config_form.masked_notion_api_token()
-                        )
-                    }),
-                );
-            }
-            config::DocumentRepositoryKind::LearnChain => {
-                items.insert(
-                    6,
-                    ListItem::new(if app.config_form.is_editing_learnchain_site_url() {
-                        format!(
-                            "LearnChain site URL (editing): {}",
-                            app.config_form.learnchain_site_url_buffer()
-                        )
-                    } else {
-                        format!(
-                            "LearnChain site URL: {}",
-                            app.config_form.learnchain_site_url
-                        )
-                    }),
-                );
-                items.insert(
-                    7,
-                    ListItem::new(if app.config_form.is_editing_learnchain_email() {
-                        format!(
-                            "LearnChain email (editing): {}",
-                            app.config_form.learnchain_email_buffer()
-                        )
-                    } else if app.config_form.learnchain_email.is_empty() {
-                        "LearnChain email: <not set>".to_string()
-                    } else {
-                        format!("LearnChain email: {}", app.config_form.learnchain_email)
-                    }),
-                );
-                items.insert(
-                    8,
-                    ListItem::new(if app.config_form.is_editing_learnchain_password() {
-                        format!(
-                            "LearnChain password (editing): {}",
-                            app.config_form.masked_learnchain_password_buffer()
-                        )
-                    } else {
-                        format!(
-                            "LearnChain password: {}",
-                            app.config_form.masked_learnchain_password()
-                        )
-                    }),
-                );
-            }
-        }
-
-        // Add provider-specific fields
-        match app.config_form.ai_provider {
-            config::AiProvider::OpenAI => {
-                items.push(ListItem::new(format!(
-                    "OpenAI model: {}",
-                    app.config_form.openai_model.label()
-                )));
-                items.push(ListItem::new(if app.config_form.is_editing_openai_key() {
-                    format!(
-                        "OpenAI API key (editing): {}",
-                        app.config_form.masked_openai_key_buffer()
-                    )
-                } else {
-                    format!("OpenAI API key: {}", app.config_form.masked_openai_key())
-                }));
-            }
-            config::AiProvider::Anthropic => {
-                items.push(ListItem::new(format!(
-                    "Anthropic model: {}",
-                    app.config_form.anthropic_model.label()
-                )));
-                items.push(ListItem::new(
-                    if app.config_form.is_editing_anthropic_key() {
-                        format!(
-                            "Anthropic API key (editing): {}",
-                            app.config_form.masked_anthropic_key_buffer()
-                        )
-                    } else {
-                        format!(
-                            "Anthropic API key: {}",
-                            app.config_form.masked_anthropic_key()
-                        )
-                    },
-                ));
-            }
-            config::AiProvider::OpenRouter => {
-                items.push(ListItem::new(
-                    if app.config_form.is_editing_openrouter_model() {
-                        format!(
-                            "OpenRouter model (editing): {}",
-                            app.config_form.openrouter_model_buffer()
-                        )
-                    } else if app.config_form.openrouter_model.is_empty() {
-                        "OpenRouter model: <not set>".to_string()
-                    } else {
-                        format!("OpenRouter model: {}", app.config_form.openrouter_model)
-                    },
-                ));
-                items.push(ListItem::new(
-                    if app.config_form.is_editing_openrouter_key() {
-                        format!(
-                            "OpenRouter API key (editing): {}",
-                            app.config_form.masked_openrouter_key_buffer()
-                        )
-                    } else {
-                        format!(
-                            "OpenRouter API key: {}",
-                            app.config_form.masked_openrouter_key()
-                        )
-                    },
-                ));
-            }
-            config::AiProvider::CodexCli => {}
-        }
-
-        let mut list_state = ListState::default();
-        list_state.select(Some(app.config_form.selected_index()));
-
-        frame.render_stateful_widget(
-            List::new(items)
-                .block(Block::bordered().title(Line::from("Config")))
-                .highlight_symbol("▶ ")
-                .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+        let header_status = if app.config_form.is_editing_text_field() {
+            format!(
+                "Editing now: {}",
+                Self::config_field_title(app, current_field)
+            )
+        } else {
+            format!(
+                "Focused setting: {}",
+                Self::config_field_title(app, current_field)
+            )
+        };
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{}\n{}",
+                header_status,
+                active_section.description()
+            ))
+            .style(Style::default().fg(Color::Rgb(210, 225, 255)))
+            .block(
+                Block::bordered().title(Line::from(format!("Config • {}", active_section.title()))),
+            ),
             layout[0],
-            &mut list_state,
         );
 
-        // Compact single-line status
-        let status = if let Some(error) = &app.error {
-            format!("Error: {}", error)
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(28),
+                Constraint::Min(36),
+                Constraint::Length(42),
+            ])
+            .split(layout[1]);
+
+        let sections = [
+            config::ConfigSection::Session,
+            config::ConfigSection::Export,
+            config::ConfigSection::Ai,
+        ];
+        let section_items = sections
+            .iter()
+            .map(|section| {
+                ListItem::new(Text::from(vec![
+                    Line::from(section.title().to_string()),
+                    Line::from(Self::config_section_summary(app, *section))
+                        .style(Style::default().fg(Color::DarkGray)),
+                ]))
+            })
+            .collect::<Vec<_>>();
+        let mut section_state = ListState::default();
+        section_state.select(Some(Self::config_section_index(active_section)));
+        frame.render_stateful_widget(
+            List::new(section_items)
+                .block(Block::bordered().title(Line::from("Sections")))
+                .highlight_symbol("▸ ")
+                .highlight_style(
+                    Style::default()
+                        .fg(Color::Rgb(120, 200, 255))
+                        .add_modifier(Modifier::BOLD),
+                ),
+            columns[0],
+            &mut section_state,
+        );
+
+        let field_items = fields_in_section
+            .iter()
+            .map(|field| {
+                ListItem::new(Text::from(vec![
+                    Line::from(format!(
+                        "{}: {}",
+                        Self::config_field_title(app, *field),
+                        Self::config_field_value(app, *field)
+                    )),
+                    Line::from(Self::config_field_summary(app, *field))
+                        .style(Style::default().fg(Color::DarkGray)),
+                ]))
+            })
+            .collect::<Vec<_>>();
+        let mut field_state = ListState::default();
+        field_state.select(Some(app.config_form.selected_index_in_section()));
+        frame.render_stateful_widget(
+            List::new(field_items)
+                .block(Block::bordered().title(Line::from(active_section.title())))
+                .highlight_symbol("▶ ")
+                .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+            columns[1],
+            &mut field_state,
+        );
+
+        let mut detail_lines = vec![
+            Line::from(Self::config_field_summary(app, current_field)),
+            Line::from(""),
+            Line::from(format!(
+                "Current value: {}",
+                Self::config_field_value(app, current_field)
+            )),
+            Line::from(""),
+            Line::from("How it changes the app:"),
+            Line::from(Self::config_field_effect(app, current_field)),
+            Line::from(""),
+            Line::from("How to change it:"),
+            Line::from(Self::config_field_controls(app, current_field)),
+        ];
+        if let Some(extra_help) = Self::config_field_extra_help(app, current_field) {
+            detail_lines.push(Line::from(""));
+            detail_lines.push(Line::from("Watch for:"));
+            detail_lines.push(Line::from(extra_help));
+        }
+        frame.render_widget(
+            Paragraph::new(Text::from(detail_lines))
+                .block(Block::bordered().title(Line::from(format!(
+                    "Focus • {}",
+                    Self::config_field_title(app, current_field)
+                ))))
+                .wrap(Wrap { trim: false }),
+            columns[2],
+        );
+
+        let status_lines = if let Some(error) = &app.error {
+            vec![
+                format!("Error: {}", error),
+                format!(
+                    "Section: {} • {} item(s) in view",
+                    active_section.title(),
+                    fields_in_section.len()
+                ),
+                "Use the focused field help on the right to resolve the issue.".to_string(),
+            ]
         } else if let Some(config_status) = &app.config_form.status {
-            config_status.clone()
+            vec![
+                config_status.clone(),
+                format!(
+                    "Section: {} • {} item(s) in view",
+                    active_section.title(),
+                    fields_in_section.len()
+                ),
+                if app.config_form.is_editing_text_field() {
+                    "Typing affects only the active field. Enter saves. Esc cancels.".to_string()
+                } else {
+                    "↑↓ choose a field. ←→ changes selectors and numbers. Enter edits text fields."
+                        .to_string()
+                },
+            ]
         } else if app.config_form.dirty {
-            "Unsaved changes • s:save r:reset m:menu".to_string()
+            vec![
+                "Unsaved changes in the current config form.".to_string(),
+                format!(
+                    "Section: {} • {} item(s) in view",
+                    active_section.title(),
+                    fields_in_section.len()
+                ),
+                "s saves • r reverts to disk • m saves and returns to the menu".to_string(),
+            ]
         } else {
-            "↑↓:select ←→:adjust Enter:edit s:save m:menu".to_string()
+            vec![
+                format!(
+                    "Ready. Section: {} • {} item(s) in view",
+                    active_section.title(),
+                    fields_in_section.len()
+                ),
+                "↑↓ select within this section • ←→ adjust values • Enter edits text fields"
+                    .to_string(),
+                "s save • r reset • m save+menu • Esc/q quit".to_string(),
+            ]
         };
 
-        frame.render_widget(Paragraph::new(status).block(Block::bordered()), layout[1]);
+        frame.render_widget(
+            Paragraph::new(status_lines.join("\n"))
+                .block(Block::bordered().title(Line::from("Navigation & Status"))),
+            layout[2],
+        );
+    }
+
+    fn config_section_index(section: config::ConfigSection) -> usize {
+        match section {
+            config::ConfigSection::Session => 0,
+            config::ConfigSection::Export => 1,
+            config::ConfigSection::Ai => 2,
+        }
+    }
+
+    fn config_section_summary(app: &App, section: config::ConfigSection) -> String {
+        match section {
+            config::ConfigSection::Session => format!(
+                "Source {} • max {} • sample {}%",
+                app.config_form.session_source.label(),
+                app.config_form.max_events,
+                app.config_form.sampling_percentage
+            ),
+            config::ConfigSection::Export => {
+                let repository = app.config_form.document_repository.label();
+                let artifact_mode = if app.config_form.write_output_artifacts {
+                    "file output on"
+                } else {
+                    "file output off"
+                };
+                format!("Repo {} • {}", repository, artifact_mode)
+            }
+            config::ConfigSection::Ai => {
+                let model = match app.config_form.ai_provider {
+                    config::AiProvider::OpenAI => app.config_form.openai_model.label().to_string(),
+                    config::AiProvider::Anthropic => {
+                        app.config_form.anthropic_model.label().to_string()
+                    }
+                    config::AiProvider::OpenRouter => {
+                        if app.config_form.openrouter_model.trim().is_empty() {
+                            "<model not set>".to_string()
+                        } else {
+                            app.config_form.openrouter_model.clone()
+                        }
+                    }
+                    config::AiProvider::CodexCli => "CLI default".to_string(),
+                };
+                format!("{} • {}", app.config_form.ai_provider.label(), model)
+            }
+        }
+    }
+
+    fn config_field_title(app: &App, field: config::ConfigField) -> String {
+        match field {
+            config::ConfigField::MaxEvents => "Max events per summary".to_string(),
+            config::ConfigField::MinQuiz => "Minimum quiz questions".to_string(),
+            config::ConfigField::SamplingPercentage => "Event sampling percent".to_string(),
+            config::ConfigField::SessionSource => "Session source".to_string(),
+            config::ConfigField::OutputArtifacts => "Write quiz artifacts to output".to_string(),
+            config::ConfigField::DocumentRepository => "Document repository".to_string(),
+            config::ConfigField::DocumentRepositoryTarget => {
+                match app.config_form.document_repository {
+                    config::DocumentRepositoryKind::Notion => "Notion destination".to_string(),
+                    _ => "Repository target".to_string(),
+                }
+            }
+            config::ConfigField::NotionApiToken => "Notion API token".to_string(),
+            config::ConfigField::LearnChainSiteUrl => "LearnChain site URL".to_string(),
+            config::ConfigField::LearnChainEmail => "LearnChain email".to_string(),
+            config::ConfigField::LearnChainPassword => "LearnChain password".to_string(),
+            config::ConfigField::AiProvider => "AI provider".to_string(),
+            config::ConfigField::OpenAiModel => "OpenAI model".to_string(),
+            config::ConfigField::OpenAiKey => "OpenAI API key".to_string(),
+            config::ConfigField::AnthropicModel => "Anthropic model".to_string(),
+            config::ConfigField::AnthropicKey => "Anthropic API key".to_string(),
+            config::ConfigField::OpenRouterModel => "OpenRouter model".to_string(),
+            config::ConfigField::OpenRouterKey => "OpenRouter API key".to_string(),
+        }
+    }
+
+    fn config_field_value(app: &App, field: config::ConfigField) -> String {
+        match field {
+            config::ConfigField::MaxEvents => app.config_form.max_events.to_string(),
+            config::ConfigField::MinQuiz => app.config_form.min_quiz_questions.to_string(),
+            config::ConfigField::SamplingPercentage => {
+                format!("{}%", app.config_form.sampling_percentage)
+            }
+            config::ConfigField::SessionSource => {
+                app.config_form.session_source.label().to_string()
+            }
+            config::ConfigField::OutputArtifacts => {
+                if app.config_form.write_output_artifacts {
+                    "Enabled".to_string()
+                } else {
+                    "Disabled".to_string()
+                }
+            }
+            config::ConfigField::DocumentRepository => {
+                app.config_form.document_repository.label().to_string()
+            }
+            config::ConfigField::DocumentRepositoryTarget => {
+                if app.config_form.is_editing_document_repository_target() {
+                    let value = app.config_form.document_repository_target_buffer();
+                    if value.is_empty() {
+                        "<editing empty value>".to_string()
+                    } else {
+                        value.to_string()
+                    }
+                } else if app.config_form.document_repository_target.is_empty() {
+                    "<not set>".to_string()
+                } else {
+                    app.config_form.document_repository_target.clone()
+                }
+            }
+            config::ConfigField::NotionApiToken => {
+                if app.config_form.is_editing_notion_api_token() {
+                    app.config_form.masked_notion_api_token_buffer()
+                } else {
+                    app.config_form.masked_notion_api_token()
+                }
+            }
+            config::ConfigField::LearnChainSiteUrl => {
+                if app.config_form.is_editing_learnchain_site_url() {
+                    app.config_form.learnchain_site_url_buffer().to_string()
+                } else {
+                    app.config_form.learnchain_site_url.clone()
+                }
+            }
+            config::ConfigField::LearnChainEmail => {
+                if app.config_form.is_editing_learnchain_email() {
+                    let value = app.config_form.learnchain_email_buffer();
+                    if value.is_empty() {
+                        "<editing empty value>".to_string()
+                    } else {
+                        value.to_string()
+                    }
+                } else if app.config_form.learnchain_email.trim().is_empty() {
+                    "<not set>".to_string()
+                } else {
+                    app.config_form.learnchain_email.clone()
+                }
+            }
+            config::ConfigField::LearnChainPassword => {
+                if app.config_form.is_editing_learnchain_password() {
+                    app.config_form.masked_learnchain_password_buffer()
+                } else {
+                    app.config_form.masked_learnchain_password()
+                }
+            }
+            config::ConfigField::AiProvider => app.config_form.ai_provider.label().to_string(),
+            config::ConfigField::OpenAiModel => app.config_form.openai_model.label().to_string(),
+            config::ConfigField::OpenAiKey => {
+                if app.config_form.is_editing_openai_key() {
+                    app.config_form.masked_openai_key_buffer()
+                } else {
+                    app.config_form.masked_openai_key()
+                }
+            }
+            config::ConfigField::AnthropicModel => {
+                app.config_form.anthropic_model.label().to_string()
+            }
+            config::ConfigField::AnthropicKey => {
+                if app.config_form.is_editing_anthropic_key() {
+                    app.config_form.masked_anthropic_key_buffer()
+                } else {
+                    app.config_form.masked_anthropic_key()
+                }
+            }
+            config::ConfigField::OpenRouterModel => {
+                if app.config_form.is_editing_openrouter_model() {
+                    let value = app.config_form.openrouter_model_buffer();
+                    if value.is_empty() {
+                        "<editing empty value>".to_string()
+                    } else {
+                        value.to_string()
+                    }
+                } else if app.config_form.openrouter_model.trim().is_empty() {
+                    "<not set>".to_string()
+                } else {
+                    app.config_form.openrouter_model.clone()
+                }
+            }
+            config::ConfigField::OpenRouterKey => {
+                if app.config_form.is_editing_openrouter_key() {
+                    app.config_form.masked_openrouter_key_buffer()
+                } else {
+                    app.config_form.masked_openrouter_key()
+                }
+            }
+        }
+    }
+
+    fn config_field_summary(app: &App, field: config::ConfigField) -> String {
+        match field {
+            config::ConfigField::MaxEvents => {
+                "Caps the number of events copied into generated markdown summaries.".to_string()
+            }
+            config::ConfigField::MinQuiz => {
+                "Sets the minimum question count the model must produce.".to_string()
+            }
+            config::ConfigField::SamplingPercentage => {
+                "Keeps long sessions smaller before quiz generation runs.".to_string()
+            }
+            config::ConfigField::SessionSource => {
+                "Switches which coding assistant history LearnChain loads.".to_string()
+            }
+            config::ConfigField::OutputArtifacts => {
+                "Controls whether quiz JSON artifacts are saved under output/.".to_string()
+            }
+            config::ConfigField::DocumentRepository => {
+                "Turns on optional export destinations for items in the Library.".to_string()
+            }
+            config::ConfigField::DocumentRepositoryTarget => {
+                match app.config_form.document_repository {
+                    config::DocumentRepositoryKind::Notion => {
+                        "Sets the Notion page or database used by Library exports.".to_string()
+                    }
+                    _ => "Sets the remote destination for exported documents.".to_string(),
+                }
+            }
+            config::ConfigField::NotionApiToken => {
+                "Stores the credential used for Notion document export.".to_string()
+            }
+            config::ConfigField::LearnChainSiteUrl => {
+                "Defines which LearnChain server receives uploaded artifacts.".to_string()
+            }
+            config::ConfigField::LearnChainEmail => {
+                "Supplies the account email used for LearnChain uploads.".to_string()
+            }
+            config::ConfigField::LearnChainPassword => {
+                "Supplies the account password used for LearnChain uploads.".to_string()
+            }
+            config::ConfigField::AiProvider => {
+                "Chooses the backend used for quizzes and deep-dive generation.".to_string()
+            }
+            config::ConfigField::OpenAiModel => {
+                "Picks the OpenAI model used after choosing OpenAI.".to_string()
+            }
+            config::ConfigField::OpenAiKey => {
+                "Adds the credential required for OpenAI-backed requests.".to_string()
+            }
+            config::ConfigField::AnthropicModel => {
+                "Picks the Anthropic model used after choosing Anthropic.".to_string()
+            }
+            config::ConfigField::AnthropicKey => {
+                "Adds the credential required for Anthropic-backed requests.".to_string()
+            }
+            config::ConfigField::OpenRouterModel => {
+                "Sets the exact OpenRouter model id LearnChain should call.".to_string()
+            }
+            config::ConfigField::OpenRouterKey => {
+                "Adds the credential required for OpenRouter-backed requests.".to_string()
+            }
+        }
+    }
+
+    fn config_field_effect(app: &App, field: config::ConfigField) -> String {
+        match field {
+            config::ConfigField::MaxEvents => {
+                "Higher values preserve more session context, but they also make summaries larger and downstream prompts heavier.".to_string()
+            }
+            config::ConfigField::MinQuiz => {
+                "This changes the floor for every generated quiz so the model must return at least this many questions.".to_string()
+            }
+            config::ConfigField::SamplingPercentage => {
+                "This trims long sessions before quiz generation so response time and token usage stay under control.".to_string()
+            }
+            config::ConfigField::SessionSource => {
+                "Changing this switches where the session picker and latest-session loader read history from across the app.".to_string()
+            }
+            config::ConfigField::OutputArtifacts => {
+                "When enabled, quiz JSON is written to disk in output/ so it can be revisited later from the Library or inspected manually.".to_string()
+            }
+            config::ConfigField::DocumentRepository => {
+                "Selecting a repository reveals the extra credentials and destination fields required to export library artifacts.".to_string()
+            }
+            config::ConfigField::DocumentRepositoryTarget => match app.config_form.document_repository
+            {
+                config::DocumentRepositoryKind::Notion => {
+                    "Library exports will create new pages under this Notion destination.".to_string()
+                }
+                _ => "Exports use this target when sending documents to the configured repository.".to_string(),
+            },
+            config::ConfigField::NotionApiToken => {
+                "Without this token, Notion export stays unavailable even if a destination is configured.".to_string()
+            }
+            config::ConfigField::LearnChainSiteUrl => {
+                "Uploads are sent to this base URL, and the signup link in help text is built from it.".to_string()
+            }
+            config::ConfigField::LearnChainEmail => {
+                "This email is used only for authenticating export requests to the LearnChain service.".to_string()
+            }
+            config::ConfigField::LearnChainPassword => {
+                "This password is stored in config and used only when the app uploads documents to LearnChain.".to_string()
+            }
+            config::ConfigField::AiProvider => {
+                "Changing the provider changes the visible model and credential fields and decides which backend serves every generation request.".to_string()
+            }
+            config::ConfigField::OpenAiModel => {
+                "This model will be used for both quiz generation and deep dives whenever OpenAI is active.".to_string()
+            }
+            config::ConfigField::OpenAiKey => {
+                "If the key is missing, generation requests cannot start while OpenAI is selected.".to_string()
+            }
+            config::ConfigField::AnthropicModel => {
+                "This model will be used for both quiz generation and deep dives whenever Anthropic is active.".to_string()
+            }
+            config::ConfigField::AnthropicKey => {
+                "If the key is missing, generation requests cannot start while Anthropic is selected.".to_string()
+            }
+            config::ConfigField::OpenRouterModel => {
+                "OpenRouter requires an explicit model id, so leaving this blank blocks generation even if the API key is present.".to_string()
+            }
+            config::ConfigField::OpenRouterKey => {
+                "If the key is missing, generation requests cannot start while OpenRouter is selected.".to_string()
+            }
+        }
+    }
+
+    fn config_field_controls(app: &App, field: config::ConfigField) -> String {
+        if app.config_form.is_editing_text_field() && app.config_form.current_field() == field {
+            "Type or paste the new value. Press Enter to save it or Esc to cancel the edit."
+                .to_string()
+        } else {
+            match field {
+                config::ConfigField::DocumentRepositoryTarget
+                | config::ConfigField::NotionApiToken
+                | config::ConfigField::LearnChainSiteUrl
+                | config::ConfigField::LearnChainEmail
+                | config::ConfigField::LearnChainPassword
+                | config::ConfigField::OpenAiKey
+                | config::ConfigField::AnthropicKey
+                | config::ConfigField::OpenRouterModel
+                | config::ConfigField::OpenRouterKey => {
+                    "Press Enter to edit this text field. Paste is supported while editing."
+                        .to_string()
+                }
+                _ => "Use Left/Right (or h/l) to cycle or adjust this value, then press s to save."
+                    .to_string(),
+            }
+        }
+    }
+
+    fn config_field_extra_help(app: &App, field: config::ConfigField) -> Option<String> {
+        match field {
+            config::ConfigField::DocumentRepositoryTarget
+                if app.config_form.document_repository == config::DocumentRepositoryKind::Notion =>
+            {
+                Some(
+                    "Enter the destination database/page ID or paste the full Notion URL."
+                        .to_string(),
+                )
+            }
+            config::ConfigField::NotionApiToken => {
+                Some(config::notion_token_help_message().to_string())
+            }
+            config::ConfigField::LearnChainSiteUrl
+            | config::ConfigField::LearnChainEmail
+            | config::ConfigField::LearnChainPassword
+                if app.config_form.document_repository == config::DocumentRepositoryKind::LearnChain =>
+            {
+                Some(config::learnchain_credentials_help_message(
+                    &app.config_form.learnchain_site_url,
+                ))
+            }
+            config::ConfigField::AiProvider
+                if app.config_form.ai_provider == config::AiProvider::CodexCli =>
+            {
+                Some(config::codex_cli_config_help_message().to_string())
+            }
+            config::ConfigField::OpenAiKey
+                if app.config_form.openai_api_key.trim().is_empty() =>
+            {
+                Some(config::AiProvider::OpenAI.setup_help().to_string())
+            }
+            config::ConfigField::AnthropicKey
+                if app.config_form.anthropic_api_key.trim().is_empty() =>
+            {
+                Some(config::AiProvider::Anthropic.setup_help().to_string())
+            }
+            config::ConfigField::OpenRouterModel
+                if app.config_form.openrouter_model.trim().is_empty() =>
+            {
+                Some("Enter an exact model id like openrouter/auto or another supported OpenRouter model slug.".to_string())
+            }
+            config::ConfigField::OpenRouterKey
+                if app.config_form.openrouter_api_key.trim().is_empty() =>
+            {
+                Some(config::AiProvider::OpenRouter.setup_help().to_string())
+            }
+            _ => None,
+        }
     }
 
     fn header_text(app: &App) -> String {
