@@ -121,6 +121,12 @@ impl AppConfig {
                 },
                 api_key: self.openrouter_api_key.clone(),
             },
+            AiProvider::CodexCli => ResolvedLlmConfig {
+                provider: self.ai_provider,
+                model_name: "codex-exec".to_string(),
+                model_label: "CLI default".to_string(),
+                api_key: String::new(),
+            },
         }
     }
 }
@@ -387,6 +393,7 @@ pub enum AiProvider {
     OpenAI,
     Anthropic,
     OpenRouter,
+    CodexCli,
 }
 
 impl AiProvider {
@@ -395,10 +402,11 @@ impl AiProvider {
             Self::OpenAI => "OpenAI",
             Self::Anthropic => "Anthropic",
             Self::OpenRouter => "OpenRouter",
+            Self::CodexCli => "Codex CLI",
         }
     }
 
-    pub fn missing_key_help(self) -> &'static str {
+    pub fn setup_help(self) -> &'static str {
         match self {
             Self::OpenAI => {
                 "OpenAI API key not configured. Open the Config view (select \"OpenAI API key\" and press Enter) or run `learnchain --set-openai-key <your-key>` to add it."
@@ -409,6 +417,9 @@ impl AiProvider {
             Self::OpenRouter => {
                 "OpenRouter API key not configured. Open the Config view or run `learnchain --set-openrouter-key <your-key>` to add it."
             }
+            Self::CodexCli => {
+                "Codex CLI is not available. Ensure `codex` is installed and authenticated in your shell."
+            }
         }
     }
 
@@ -416,15 +427,17 @@ impl AiProvider {
         match self {
             Self::OpenAI => Self::Anthropic,
             Self::Anthropic => Self::OpenRouter,
-            Self::OpenRouter => Self::OpenAI,
+            Self::OpenRouter => Self::CodexCli,
+            Self::CodexCli => Self::OpenAI,
         }
     }
 
     pub fn previous(self) -> Self {
         match self {
-            Self::OpenAI => Self::OpenRouter,
+            Self::OpenAI => Self::CodexCli,
             Self::Anthropic => Self::OpenAI,
             Self::OpenRouter => Self::Anthropic,
+            Self::CodexCli => Self::OpenRouter,
         }
     }
 }
@@ -568,6 +581,12 @@ impl ConfigForm {
                 },
                 api_key: self.openrouter_api_key.clone(),
             },
+            AiProvider::CodexCli => ResolvedLlmConfig {
+                provider: self.ai_provider,
+                model_name: "codex-exec".to_string(),
+                model_label: "CLI default".to_string(),
+                api_key: String::new(),
+            },
         }
     }
 
@@ -612,6 +631,7 @@ impl ConfigForm {
                 fields.push(ConfigField::OpenRouterModel);
                 fields.push(ConfigField::OpenRouterKey);
             }
+            AiProvider::CodexCli => {}
         }
 
         fields
@@ -711,7 +731,10 @@ impl ConfigForm {
                 if updated != self.ai_provider {
                     self.ai_provider = updated;
                     self.dirty = true;
-                    self.status = None;
+                    self.status = match updated {
+                        AiProvider::CodexCli => Some(codex_cli_config_help_message().to_string()),
+                        _ => None,
+                    };
                     // Reset field to AiProvider when provider changes to avoid pointing to hidden field
                     self.field = ConfigField::AiProvider;
                 }
@@ -1359,6 +1382,10 @@ pub(crate) fn notion_token_help_message() -> &'static str {
     "Notion export requires a Notion API token. Select \"Notion API token\" and press Enter. In Notion, create an internal integration, copy its token, and connect that integration to the target database."
 }
 
+pub(crate) fn codex_cli_config_help_message() -> &'static str {
+    "Codex CLI uses your existing codex login and default model/profile. LearnChain will pass only the prepared prompt and output schema."
+}
+
 pub(crate) fn validate_learnchain_site_url(value: &str) -> std::result::Result<(), String> {
     let normalized = normalize_learnchain_site_url(value);
     let url = reqwest::Url::parse(&normalized)
@@ -1486,11 +1513,7 @@ mod tests {
         assert_eq!(resolved.model_name, "gpt-5");
         assert_eq!(resolved.model_label, "gpt-5");
         assert_eq!(resolved.api_key, "sk-openai");
-        assert!(
-            AiProvider::OpenAI
-                .missing_key_help()
-                .contains("--set-openai-key")
-        );
+        assert!(AiProvider::OpenAI.setup_help().contains("--set-openai-key"));
     }
 
     #[test]
@@ -1509,7 +1532,7 @@ mod tests {
         assert_eq!(resolved.api_key, "sk-anthropic");
         assert!(
             AiProvider::Anthropic
-                .missing_key_help()
+                .setup_help()
                 .contains("--set-anthropic-key")
         );
     }
@@ -1528,9 +1551,24 @@ mod tests {
         assert_eq!(resolved.api_key, "sk-openrouter");
         assert!(
             AiProvider::OpenRouter
-                .missing_key_help()
+                .setup_help()
                 .contains("--set-openrouter-key")
         );
+    }
+
+    #[test]
+    fn app_config_resolved_llm_for_codex_cli() {
+        let config = AppConfig {
+            ai_provider: AiProvider::CodexCli,
+            ..AppConfig::default()
+        };
+
+        let resolved = config.resolved_llm();
+        assert_eq!(resolved.provider, AiProvider::CodexCli);
+        assert_eq!(resolved.model_name, "codex-exec");
+        assert_eq!(resolved.model_label, "CLI default");
+        assert!(resolved.api_key.is_empty());
+        assert!(AiProvider::CodexCli.setup_help().contains("Codex CLI"));
     }
 
     #[test]
@@ -1628,6 +1666,26 @@ mod tests {
     }
 
     #[test]
+    fn config_form_visible_fields_stop_at_provider_for_codex_cli() {
+        let form = ConfigForm::from_config(AppConfig {
+            ai_provider: AiProvider::CodexCli,
+            ..AppConfig::default()
+        });
+        assert_eq!(
+            form.visible_fields(),
+            vec![
+                ConfigField::MaxEvents,
+                ConfigField::MinQuiz,
+                ConfigField::SamplingPercentage,
+                ConfigField::SessionSource,
+                ConfigField::OutputArtifacts,
+                ConfigField::DocumentRepository,
+                ConfigField::AiProvider,
+            ]
+        );
+    }
+
+    #[test]
     fn config_form_visible_fields_include_learnchain_fields_for_selected_repository() {
         let form = ConfigForm::from_config(AppConfig {
             document_repository: DocumentRepositoryKind::LearnChain,
@@ -1684,6 +1742,31 @@ mod tests {
 
         form.adjust_current(1);
         assert_eq!(form.document_repository, DocumentRepositoryKind::None);
+    }
+
+    #[test]
+    fn ai_provider_selector_cycles_through_codex_cli() {
+        let mut form = ConfigForm::from_config(AppConfig::default());
+        form.field = ConfigField::AiProvider;
+
+        form.adjust_current(1);
+        assert_eq!(form.ai_provider, AiProvider::Anthropic);
+
+        form.adjust_current(1);
+        assert_eq!(form.ai_provider, AiProvider::OpenRouter);
+
+        form.adjust_current(1);
+        assert_eq!(form.ai_provider, AiProvider::CodexCli);
+        assert_eq!(
+            form.status.as_deref(),
+            Some(codex_cli_config_help_message())
+        );
+
+        form.adjust_current(1);
+        assert_eq!(form.ai_provider, AiProvider::OpenAI);
+
+        form.adjust_current(-1);
+        assert_eq!(form.ai_provider, AiProvider::CodexCli);
     }
 
     #[test]
@@ -1763,5 +1846,29 @@ sampling_percentage = 10
         assert_eq!(config.learnchain_site_url, LEARNCHAIN_DEFAULT_SITE_URL);
         assert!(config.learnchain_email.is_empty());
         assert!(config.learnchain_password.is_empty());
+    }
+
+    #[test]
+    fn app_config_deserializes_codex_cli_provider() {
+        let config: AppConfig = toml::from_str(
+            r#"
+default_max_events = 15
+min_quiz_questions = 5
+session_source = "codex"
+write_output_artifacts = false
+document_repository = "none"
+ai_provider = "codex_cli"
+openai_model = "gpt5-mini"
+openai_api_key = ""
+anthropic_model = "claude-sonnet4"
+anthropic_api_key = ""
+openrouter_model = ""
+openrouter_api_key = ""
+sampling_percentage = 10
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.ai_provider, AiProvider::CodexCli);
     }
 }

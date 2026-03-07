@@ -161,6 +161,13 @@ pub(crate) fn handle_ai_error(app: &mut App, kind: AiTaskKind, message: String) 
     }
 }
 
+fn learning_call_progress_message(provider: crate::config::AiProvider) -> &'static str {
+    match provider {
+        crate::config::AiProvider::CodexCli => "Calling Codex CLI...",
+        _ => "Calling LLM via Rig...",
+    }
+}
+
 pub(crate) fn trigger_learning_response(app: &mut App) {
     log_debug("App: menu option 'Generate learning response' selected");
     if app.ai_loading {
@@ -171,7 +178,7 @@ pub(crate) fn trigger_learning_response(app: &mut App) {
     let backend = match app.llm_backend.clone() {
         Some(generator) => generator,
         None => {
-            let help = app.ai_provider.missing_key_help().to_string();
+            let help = app.ai_provider.setup_help().to_string();
             App::push_error(&mut app.error, help.clone());
             app.ai_status = Some(help);
             log_debug("App: learning generator unavailable; aborting generation");
@@ -193,6 +200,7 @@ pub(crate) fn trigger_learning_response(app: &mut App) {
     start_ai_task(app, AiTaskKind::LearningLesson);
     let summary_override = app.summary_content.clone();
     let provider_label = app.ai_provider.label().to_string();
+    let request_message = learning_call_progress_message(app.ai_provider);
     let sender = take_sender(app);
 
     thread::spawn(move || {
@@ -218,12 +226,7 @@ pub(crate) fn trigger_learning_response(app: &mut App) {
             }
         };
 
-        send_progress(
-            &sender,
-            AiTaskKind::LearningLesson,
-            "Calling LLM via Rig...",
-            30,
-        );
+        send_progress(&sender, AiTaskKind::LearningLesson, request_message, 30);
 
         let result = runtime
             .block_on(backend.generate_learning_response_with_progress(summary_override, &sender));
@@ -259,7 +262,7 @@ pub(crate) fn trigger_learning_response_skip_sync(app: &mut App) {
     let backend = match app.llm_backend.clone() {
         Some(generator) => generator,
         None => {
-            let help = app.ai_provider.missing_key_help().to_string();
+            let help = app.ai_provider.setup_help().to_string();
             App::push_error(&mut app.error, help.clone());
             app.ai_status = Some(help);
             log_debug("App: learning generator unavailable; aborting generation");
@@ -279,6 +282,7 @@ pub(crate) fn trigger_learning_response_skip_sync(app: &mut App) {
     start_ai_task(app, AiTaskKind::LearningLesson);
     let summary_override = app.summary_content.clone();
     let provider_label = app.ai_provider.label().to_string();
+    let request_message = learning_call_progress_message(app.ai_provider);
     let sender = take_sender(app);
 
     thread::spawn(move || {
@@ -304,12 +308,7 @@ pub(crate) fn trigger_learning_response_skip_sync(app: &mut App) {
             }
         };
 
-        send_progress(
-            &sender,
-            AiTaskKind::LearningLesson,
-            "Calling LLM via Rig...",
-            30,
-        );
+        send_progress(&sender, AiTaskKind::LearningLesson, request_message, 30);
         let result = runtime
             .block_on(backend.generate_learning_response_with_progress(summary_override, &sender));
         drop(runtime);
@@ -344,7 +343,7 @@ pub(crate) fn trigger_deep_dive_response_from_session(app: &mut App, session: Se
     let backend = match app.llm_backend.clone() {
         Some(generator) => generator,
         None => {
-            let help = app.ai_provider.missing_key_help().to_string();
+            let help = app.ai_provider.setup_help().to_string();
             App::push_error(&mut app.error, help.clone());
             app.ai_status = Some(help);
             log_debug("App: deep-dive backend unavailable; aborting generation");
@@ -703,10 +702,10 @@ mod tests {
         app.ai_provider = AiProvider::Anthropic;
         trigger_learning_response(&mut app);
         let error = app.error.as_ref().unwrap();
-        assert!(error.contains(AiProvider::Anthropic.missing_key_help()));
+        assert!(error.contains(AiProvider::Anthropic.setup_help()));
         assert_eq!(
             app.ai_status.as_deref(),
-            Some(AiProvider::Anthropic.missing_key_help())
+            Some(AiProvider::Anthropic.setup_help())
         );
         assert!(!app.ai_loading);
         assert_eq!(app.view, AppView::Menu);

@@ -1,6 +1,7 @@
 .env
 /output
 /dist
+/*.tgz
 node_modules/
 bin/learnchain
 .DS_Store

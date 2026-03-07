@@ -2063,6 +2063,7 @@ impl<'a> UiRenderer<'a> {
                     },
                 ));
             }
+            config::AiProvider::CodexCli => {}
         }
 
         let mut list_state = ListState::default();

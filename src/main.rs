@@ -646,6 +646,10 @@ impl Project {
     }
 }
 
+fn is_llm_setup_error(message: &str) -> bool {
+    message.contains("not configured")
+}
+
 impl App {
     /// Construct a new instance of [`App`].
     pub fn new() -> Self {
@@ -668,15 +672,17 @@ impl App {
         let session_manager = SessionManager::from_source(config_snapshot.session_source);
         let session_load = session_manager.load_today_events();
 
-        let llm_backend = if resolved_llm.api_key.trim().is_empty() {
-            None
-        } else {
-            match LlmBackend::from_config(resolved_llm.clone(), "output") {
-                Ok(generator) => Some(generator),
-                Err(err) => {
-                    Self::push_error(&mut aggregated_error, format!("AI unavailable: {}", err));
-                    None
+        let llm_backend = match LlmBackend::from_config(resolved_llm.clone(), "output") {
+            Ok(generator) => Some(generator),
+            Err(err) => {
+                let message = err.to_string();
+                if !is_llm_setup_error(&message) {
+                    Self::push_error(
+                        &mut aggregated_error,
+                        format!("AI unavailable: {}", message),
+                    );
                 }
+                None
             }
         };
 
@@ -747,9 +753,8 @@ impl App {
 
         app.apply_session_load(session_load);
 
-        // Set appropriate help message if API key is not configured
-        if app.llm_backend.is_none() && resolved_llm.api_key.trim().is_empty() {
-            app.ai_status = Some(ai_provider.missing_key_help().to_string());
+        if app.llm_backend.is_none() {
+            app.ai_status = Some(ai_provider.setup_help().to_string());
         } else {
             app.ai_status = None;
         }
@@ -817,14 +822,19 @@ impl App {
         self.openrouter_model = config_snapshot.openrouter_model.clone();
         let resolved_llm = config_snapshot.resolved_llm();
 
-        if resolved_llm.api_key.trim().is_empty() {
-            self.llm_backend = None;
-            let help = self.ai_provider.missing_key_help().to_string();
-            App::push_error(&mut self.error, help.clone());
-            self.ai_status = Some(help);
-        } else {
-            self.llm_backend = LlmBackend::from_config(resolved_llm, "output").ok();
-            self.ai_status = None;
+        match LlmBackend::from_config(resolved_llm, "output") {
+            Ok(generator) => {
+                self.llm_backend = Some(generator);
+                self.ai_status = None;
+            }
+            Err(err) => {
+                let message = err.to_string();
+                self.llm_backend = None;
+                if !is_llm_setup_error(&message) {
+                    App::push_error(&mut self.error, format!("AI unavailable: {}", message));
+                }
+                self.ai_status = Some(self.ai_provider.setup_help().to_string());
+            }
         }
 
         let manager = SessionManager::from_source(config_snapshot.session_source);

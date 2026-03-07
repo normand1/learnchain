@@ -358,6 +358,9 @@ impl<'a> ConfigManager<'a> {
                     config::learnchain_credentials_help_message(
                         &self.app.config_form.learnchain_site_url,
                     )
+                } else if resolved_llm.provider == config::AiProvider::CodexCli {
+                    "Saved • Provider: Codex CLI • Model: CLI default • Uses installed codex configuration"
+                        .to_string()
                 } else {
                     format!(
                         "Saved • Provider: {} • Model: {} • Key: {}",
