@@ -1,6 +1,6 @@
 use crate::view_managers::menu_manager::MENU_OPTIONS;
 use crate::{
-    AI_LOADING_FRAMES, App, AppView, config,
+    AI_LOADING_FRAMES, App, AppView, SessionSelectionTarget, config,
     knowledge_store::{DailyAnalytics, KnowledgeAnalytics},
     markdown_rules::MarkdownRules,
     reset_learning_feedback,
@@ -30,13 +30,10 @@ impl<'a> UiRenderer<'a> {
         match self.app.view {
             AppView::Menu => self.render_menu(frame),
             AppView::Events => self.render_events(frame),
-            AppView::Learning => {
-                if self.app.learning_selecting_session {
-                    self.render_learning_session_selection(frame);
-                } else {
-                    self.render_learning(frame);
-                }
-            }
+            AppView::SessionPicker => self.render_session_picker(frame),
+            AppView::Learning => self.render_learning(frame),
+            AppView::DeepDive => self.render_deep_dive(frame),
+            AppView::Library => self.render_library(frame),
             AppView::Config => self.render_config(frame),
             AppView::Analytics => self.render_analytics(frame),
         }
@@ -59,7 +56,7 @@ impl<'a> UiRenderer<'a> {
             .constraints([
                 Constraint::Length(7),
                 Constraint::Length(3),
-                Constraint::Length(8), // Actions (4) + Config (4)
+                Constraint::Length(10),
                 Constraint::Length(4),
             ])
             .split(frame.area());
@@ -152,10 +149,10 @@ impl<'a> UiRenderer<'a> {
 
         let menu_sections = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(4), Constraint::Length(4)])
+            .constraints([Constraint::Length(6), Constraint::Length(4)])
             .split(layout[2]);
 
-        let actions_items: Vec<ListItem> = MENU_OPTIONS[..2]
+        let actions_items: Vec<ListItem> = MENU_OPTIONS[..4]
             .iter()
             .map(|label| ListItem::new(*label))
             .collect();
@@ -174,7 +171,7 @@ impl<'a> UiRenderer<'a> {
             &mut actions_state,
         );
 
-        let config_items: Vec<ListItem> = MENU_OPTIONS[2..]
+        let config_items: Vec<ListItem> = MENU_OPTIONS[4..]
             .iter()
             .map(|label| ListItem::new(*label))
             .collect();
@@ -200,7 +197,7 @@ impl<'a> UiRenderer<'a> {
             status_lines.push(format!("AI: {}", status));
         }
         status_lines.push("Use ↑/↓ or j/k to choose. Press Enter to select.".to_string());
-        status_lines.push("Press 1-4 for quick selection. Esc, Ctrl-C, or q to quit.".to_string());
+        status_lines.push("Press 1-6 for quick selection. Esc, Ctrl-C, or q to quit.".to_string());
         if app.learning_response.is_some() {
             status_lines.push("Press l to revisit the latest learning response.".to_string());
         }
@@ -767,20 +764,21 @@ impl<'a> UiRenderer<'a> {
         );
     }
 
-    fn render_learning_session_selection(&mut self, frame: &mut Frame) {
-        if self.app.learning_viewing_projects {
-            self.render_learning_projects(frame);
+    fn render_session_picker(&mut self, frame: &mut Frame) {
+        if self.app.session_picker_viewing_projects {
+            self.render_session_picker_projects(frame);
         } else {
-            self.render_learning_sessions_in_project(frame);
+            self.render_session_picker_sessions(frame);
         }
     }
 
-    fn render_learning_projects(&mut self, frame: &mut Frame) {
+    fn render_session_picker_projects(&mut self, frame: &mut Frame) {
         let app = &mut *self.app;
-        let header_title = Line::from("Select Project for Quiz")
-            .bold()
-            .blue()
-            .centered();
+        let title = match app.session_selection_target {
+            Some(SessionSelectionTarget::DeepDive) => "Select Project for Deep Dive",
+            _ => "Select Project for Quiz",
+        };
+        let header_title = Line::from(title).bold().blue().centered();
 
         let layout = Layout::default()
             .direction(Direction::Vertical)
@@ -823,7 +821,7 @@ impl<'a> UiRenderer<'a> {
         };
 
         let mut list_state = ListState::default();
-        list_state.select(app.learning_selected_project);
+        list_state.select(app.session_picker_selected_project);
 
         frame.render_stateful_widget(
             List::new(list_items)
@@ -835,7 +833,7 @@ impl<'a> UiRenderer<'a> {
         );
 
         let detail_text = match app
-            .learning_selected_project
+            .session_picker_selected_project
             .and_then(|idx| app.projects.get(idx))
         {
             Some(project) => {
@@ -899,7 +897,13 @@ impl<'a> UiRenderer<'a> {
             app.projects.len(),
             app.sessions.len()
         ));
-        status_lines.push("Use ↑/↓ or j/k to navigate. Press Enter to view sessions.".to_string());
+        status_lines.push(match app.session_selection_target {
+            Some(SessionSelectionTarget::DeepDive) => {
+                "Use ↑/↓ or j/k to navigate. Press Enter to view sessions. Press h for history."
+                    .to_string()
+            }
+            _ => "Use ↑/↓ or j/k to navigate. Press Enter to view sessions.".to_string(),
+        });
         status_lines.push("Press Backspace or m for menu. Esc, Ctrl-C, or q to quit.".to_string());
 
         frame.render_widget(
@@ -909,11 +913,11 @@ impl<'a> UiRenderer<'a> {
         );
     }
 
-    fn render_learning_sessions_in_project(&mut self, frame: &mut Frame) {
+    fn render_session_picker_sessions(&mut self, frame: &mut Frame) {
         let app = &mut *self.app;
 
         let project_name = app
-            .learning_selected_project
+            .session_picker_selected_project
             .and_then(|idx| app.projects.get(idx))
             .map(|p| p.name.clone())
             .unwrap_or_else(|| "Unknown".to_string());
@@ -933,7 +937,7 @@ impl<'a> UiRenderer<'a> {
             .split(frame.area());
 
         let session_count = app
-            .learning_selected_project
+            .session_picker_selected_project
             .and_then(|idx| app.projects.get(idx))
             .map(|p| p.session_indices.len())
             .unwrap_or(0);
@@ -952,7 +956,7 @@ impl<'a> UiRenderer<'a> {
 
         // Get sessions for the current project
         let project_sessions: Vec<&crate::session_sources::Session> = app
-            .learning_selected_project
+            .session_picker_selected_project
             .and_then(|idx| app.projects.get(idx))
             .map(|project| {
                 project
@@ -981,7 +985,7 @@ impl<'a> UiRenderer<'a> {
         };
 
         let mut list_state = ListState::default();
-        list_state.select(app.learning_selected_session);
+        list_state.select(app.session_picker_selected_session);
 
         frame.render_stateful_widget(
             List::new(list_items)
@@ -993,7 +997,7 @@ impl<'a> UiRenderer<'a> {
         );
 
         let detail_text = match app
-            .learning_selected_session
+            .session_picker_selected_session
             .and_then(|idx| project_sessions.get(idx))
         {
             Some(session) => {
@@ -1035,7 +1039,12 @@ impl<'a> UiRenderer<'a> {
 
                 details.join("\n")
             }
-            None => "Select a session to generate a quiz from.".to_string(),
+            None => match app.session_selection_target {
+                Some(SessionSelectionTarget::DeepDive) => {
+                    "Select a session to generate a deep dive from.".to_string()
+                }
+                _ => "Select a session to generate a quiz from.".to_string(),
+            },
         };
 
         frame.render_widget(
@@ -1050,7 +1059,13 @@ impl<'a> UiRenderer<'a> {
             status_lines.push(format!("Error: {}", error));
         }
         status_lines.push(format!("{} sessions in this project", session_count));
-        status_lines.push("Use ↑/↓ or j/k to navigate. Press Enter to generate quiz.".to_string());
+        status_lines.push(match app.session_selection_target {
+            Some(SessionSelectionTarget::DeepDive) => {
+                "Use ↑/↓ or j/k to navigate. Press Enter to generate deep dive. Press h for history."
+                    .to_string()
+            }
+            _ => "Use ↑/↓ or j/k to navigate. Press Enter to generate quiz.".to_string(),
+        });
         status_lines.push(
             "Press Backspace for projects, m for menu. Esc, Ctrl-C, or q to quit.".to_string(),
         );
@@ -1399,6 +1414,351 @@ impl<'a> UiRenderer<'a> {
         );
     }
 
+    fn render_deep_dive(&mut self, frame: &mut Frame) {
+        let app = &mut *self.app;
+
+        if app.ai_loading {
+            let frame_symbol = AI_LOADING_FRAMES[app.ai_loading_frame % AI_LOADING_FRAMES.len()];
+            let progress_bar = Self::render_progress_bar(app.ai_progress_percent, 30);
+            let elapsed = app
+                .ai_loading_start
+                .map(|start| format!(" ({}s)", start.elapsed().as_secs()))
+                .unwrap_or_default();
+            let stage_message = if app.ai_progress_message.is_empty() {
+                "Initializing..."
+            } else {
+                &app.ai_progress_message
+            };
+            let text = format!(
+                "{} Generating session deep dive…\n\n{} {}%\n{}{}\n\nWe'll show the markdown once the deep dive is ready.",
+                frame_symbol, progress_bar, app.ai_progress_percent, stage_message, elapsed
+            );
+            frame.render_widget(
+                Paragraph::new(text)
+                    .wrap(Wrap { trim: false })
+                    .block(Block::bordered().title(Line::from("Session Deep Dive"))),
+                frame.area(),
+            );
+            return;
+        }
+
+        if app.deep_dive_showing_history {
+            self.render_deep_dive_history(frame);
+            return;
+        }
+
+        let document = app.active_deep_dive_document();
+        let title = document
+            .map(|doc| doc.metadata.title.clone())
+            .filter(|title| !title.trim().is_empty())
+            .unwrap_or_else(|| "Session Deep Dive".to_string());
+        let header_title = Line::from(title).bold().blue().centered();
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(4),
+                Constraint::Min(10),
+                Constraint::Length(5),
+            ])
+            .split(frame.area());
+
+        let header_text = match document {
+            Some(doc) => format!(
+                "Saved file: {}\nSession: {} • {}",
+                doc.path.display(),
+                doc.metadata.session_date,
+                doc.metadata.session_id
+            ),
+            None => "No deep dive loaded. Generate one from the menu or press h to open history."
+                .to_string(),
+        };
+
+        frame.render_widget(
+            Paragraph::new(header_text)
+                .block(Block::bordered().title(header_title))
+                .wrap(Wrap { trim: false }),
+            layout[0],
+        );
+
+        let markdown = document
+            .map(|doc| strip_leading_toml_front_matter(&doc.markdown).to_string())
+            .unwrap_or_else(|| "No deep dive loaded.".to_string());
+        frame.render_widget(
+            Paragraph::new(markdown)
+                .wrap(Wrap { trim: false })
+                .scroll((app.deep_dive_scroll, 0))
+                .block(Block::bordered().title(Line::from("Markdown"))),
+            layout[1],
+        );
+
+        let mut status_lines = Vec::new();
+        if let Some(error) = &app.error {
+            status_lines.push(format!("Error: {}", error));
+        }
+        if let Some(status) = &app.ai_status {
+            status_lines.push(format!("AI: {}", status));
+        }
+        status_lines.push(
+            "Use j/k or PgUp/PgDn to scroll. Press h for history. Backspace returns from a history document."
+                .to_string(),
+        );
+        status_lines.push("Press m to return to the menu.".to_string());
+
+        frame.render_widget(
+            Paragraph::new(status_lines.join("\n"))
+                .block(Block::bordered().title(Line::from("Status"))),
+            layout[2],
+        );
+    }
+
+    fn render_deep_dive_history(&mut self, frame: &mut Frame) {
+        let app = &mut *self.app;
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(8),
+                Constraint::Length(5),
+            ])
+            .split(frame.area());
+
+        frame.render_widget(
+            Paragraph::new(format!("{} saved deep dives", app.deep_dive_history.len()))
+                .block(Block::bordered().title(Line::from("Deep Dive History").bold().blue()))
+                .centered(),
+            layout[0],
+        );
+
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(layout[1]);
+
+        let items: Vec<ListItem> = if app.deep_dive_history.is_empty() {
+            vec![ListItem::new("No deep dives have been saved yet.")]
+        } else {
+            app.deep_dive_history
+                .iter()
+                .map(|entry| {
+                    let title = if entry.metadata.title.trim().is_empty() {
+                        "Untitled Deep Dive"
+                    } else {
+                        &entry.metadata.title
+                    };
+                    let project = if entry.metadata.project_name.trim().is_empty() {
+                        "Unknown project"
+                    } else {
+                        &entry.metadata.project_name
+                    };
+                    ListItem::new(format!(
+                        "{} | {} | {}",
+                        entry.metadata.generated_at,
+                        project,
+                        truncate_string(title, 36)
+                    ))
+                })
+                .collect()
+        };
+
+        let mut list_state = ListState::default();
+        list_state.select(app.deep_dive_history_selected);
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(Block::bordered().title(Line::from("Artifacts")))
+                .highlight_symbol("▶ ")
+                .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+            body[0],
+            &mut list_state,
+        );
+
+        let detail_text = match app
+            .deep_dive_history_selected
+            .and_then(|index| app.deep_dive_history.get(index))
+        {
+            Some(entry) => format!(
+                "Title: {}\nGenerated: {}\nProject: {}\nPath: {}\nReferenced URLs: {}\nReviewed URLs: {}",
+                entry.metadata.title,
+                entry.metadata.generated_at,
+                entry.metadata.project_name,
+                entry.path.display(),
+                entry.metadata.referenced_url_count,
+                entry.metadata.reviewed_url_count
+            ),
+            None => "Select a saved deep dive to view it.".to_string(),
+        };
+
+        frame.render_widget(
+            Paragraph::new(detail_text)
+                .wrap(Wrap { trim: false })
+                .block(Block::bordered().title(Line::from("Details"))),
+            body[1],
+        );
+
+        let mut status_lines = Vec::new();
+        if let Some(error) = &app.error {
+            status_lines.push(format!("Error: {}", error));
+        }
+        status_lines.push(
+            "Use ↑/↓ or j/k to navigate. Press Enter to open a deep dive. Press r to refresh history."
+                .to_string(),
+        );
+        status_lines.push(
+            "Press Backspace to return. Press m for menu. Esc, Ctrl-C, or q to quit.".to_string(),
+        );
+
+        frame.render_widget(
+            Paragraph::new(status_lines.join("\n"))
+                .block(Block::bordered().title(Line::from("Status"))),
+            layout[2],
+        );
+    }
+
+    fn render_library(&mut self, frame: &mut Frame) {
+        let app = &mut *self.app;
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(8),
+                Constraint::Length(5),
+            ])
+            .split(frame.area());
+
+        frame.render_widget(
+            Paragraph::new(format!("{} saved artifacts", app.library_artifacts.len()))
+                .block(Block::bordered().title(Line::from("Library").bold().blue()))
+                .centered(),
+            layout[0],
+        );
+
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(layout[1]);
+
+        let items: Vec<ListItem> = if app.library_artifacts.is_empty() {
+            vec![ListItem::new("No saved deep dives or quizzes found.")]
+        } else {
+            app.library_artifacts
+                .iter()
+                .map(|entry| match entry {
+                    crate::output_manager::LibraryArtifactEntry::DeepDive(entry) => {
+                        let title = if entry.metadata.title.trim().is_empty() {
+                            "Untitled Deep Dive"
+                        } else {
+                            &entry.metadata.title
+                        };
+                        ListItem::new(format!(
+                            "{} | {} | {}",
+                            crate::output_manager::LibraryArtifactKind::DeepDive.label(),
+                            entry
+                                .metadata
+                                .generated_at
+                                .split('T')
+                                .next()
+                                .unwrap_or(&entry.metadata.generated_at),
+                            truncate_string(title, 40)
+                        ))
+                    }
+                    crate::output_manager::LibraryArtifactEntry::Quiz(entry) => {
+                        let session_date = if entry.session_date.trim().is_empty() {
+                            "<unknown date>"
+                        } else {
+                            &entry.session_date
+                        };
+                        ListItem::new(format!(
+                            "{} | {} | {} questions",
+                            crate::output_manager::LibraryArtifactKind::Quiz.label(),
+                            session_date,
+                            entry.question_count
+                        ))
+                    }
+                })
+                .collect()
+        };
+
+        let mut list_state = ListState::default();
+        list_state.select(app.library_selected);
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(Block::bordered().title(Line::from("Artifacts")))
+                .highlight_symbol("▶ ")
+                .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+            body[0],
+            &mut list_state,
+        );
+
+        let detail_text = match app
+            .library_selected
+            .and_then(|index| app.library_artifacts.get(index))
+        {
+            Some(crate::output_manager::LibraryArtifactEntry::DeepDive(entry)) => format!(
+                "Type: {}\nTitle: {}\nGenerated: {}\nProject: {}\nPath: {}",
+                crate::output_manager::LibraryArtifactKind::DeepDive.label(),
+                entry.metadata.title,
+                entry.metadata.generated_at,
+                if entry.metadata.project_name.trim().is_empty() {
+                    "Unknown project"
+                } else {
+                    &entry.metadata.project_name
+                },
+                entry.path.display()
+            ),
+            Some(crate::output_manager::LibraryArtifactEntry::Quiz(entry)) => format!(
+                "Type: {}\nSession date: {}\nKnowledge groups: {}\nQuestions: {}\nPath: {}",
+                crate::output_manager::LibraryArtifactKind::Quiz.label(),
+                if entry.session_date.trim().is_empty() {
+                    "<unknown>".to_string()
+                } else {
+                    entry.session_date.clone()
+                },
+                entry.knowledge_group_count,
+                entry.question_count,
+                entry.path.display()
+            ),
+            None => "Select a saved deep dive or quiz to open it.".to_string(),
+        };
+
+        frame.render_widget(
+            Paragraph::new(detail_text)
+                .wrap(Wrap { trim: false })
+                .block(Block::bordered().title(Line::from("Details"))),
+            body[1],
+        );
+
+        let mut status_lines = Vec::new();
+        if let Some(error) = &app.error {
+            status_lines.push(format!("Error: {}", error));
+        }
+        if let Some(status) = &app.ai_status {
+            status_lines.push(format!("Status: {}", status));
+        }
+        let repository = config::current().document_repository;
+        status_lines.push(
+            "Use ↑/↓ or j/k to navigate. Press Enter to open. Press r to refresh.".to_string(),
+        );
+        if repository != config::DocumentRepositoryKind::None {
+            status_lines.push(format!(
+                "Press e to send the selected document to {}.",
+                repository.label()
+            ));
+        } else {
+            status_lines.push(
+                "Configure a document repository in Config to enable export from the library."
+                    .to_string(),
+            );
+        }
+        status_lines.push(
+            "Press Backspace or m to return to the menu. Esc, Ctrl-C, or q to quit.".to_string(),
+        );
+
+        frame.render_widget(
+            Paragraph::new(status_lines.join("\n"))
+                .block(Block::bordered().title(Line::from("Status"))),
+            layout[2],
+        );
+    }
+
     fn render_quiz_summary(&mut self, frame: &mut Frame) {
         let app = &mut *self.app;
 
@@ -1523,10 +1883,7 @@ impl<'a> UiRenderer<'a> {
 
         let layout = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(10), // 8 config items + 2 border lines
-                Constraint::Length(3),  // compact status
-            ])
+            .constraints([Constraint::Min(3), Constraint::Length(3)])
             .split(frame.area());
 
         // Build items list dynamically based on provider
@@ -1548,7 +1905,7 @@ impl<'a> UiRenderer<'a> {
                 app.config_form.session_source.label()
             )),
             ListItem::new(format!(
-                "Write artifacts to output: {}",
+                "Write quiz artifacts to output: {}",
                 if app.config_form.write_output_artifacts {
                     "Enabled"
                 } else {
@@ -1556,10 +1913,93 @@ impl<'a> UiRenderer<'a> {
                 }
             )),
             ListItem::new(format!(
+                "Document repository: {}",
+                app.config_form.document_repository.label()
+            )),
+            ListItem::new(format!(
                 "AI Provider: {}",
                 app.config_form.ai_provider.label()
             )),
         ];
+
+        match app.config_form.document_repository {
+            config::DocumentRepositoryKind::None => {}
+            config::DocumentRepositoryKind::Notion => {
+                items.insert(
+                    6,
+                    ListItem::new(if app.config_form.is_editing_document_repository_target() {
+                        format!(
+                            "Notion destination (database/page ID or URL, editing): {}",
+                            app.config_form.document_repository_target_buffer()
+                        )
+                    } else if app.config_form.document_repository_target.is_empty() {
+                        "Notion destination (database/page ID or URL): <not set>".to_string()
+                    } else {
+                        format!(
+                            "Notion destination (database/page ID or URL): {}",
+                            app.config_form.document_repository_target
+                        )
+                    }),
+                );
+                items.insert(
+                    7,
+                    ListItem::new(if app.config_form.is_editing_notion_api_token() {
+                        format!(
+                            "Notion API token (editing): {}",
+                            app.config_form.masked_notion_api_token_buffer()
+                        )
+                    } else {
+                        format!(
+                            "Notion API token: {}",
+                            app.config_form.masked_notion_api_token()
+                        )
+                    }),
+                );
+            }
+            config::DocumentRepositoryKind::LearnChain => {
+                items.insert(
+                    6,
+                    ListItem::new(if app.config_form.is_editing_learnchain_site_url() {
+                        format!(
+                            "LearnChain site URL (editing): {}",
+                            app.config_form.learnchain_site_url_buffer()
+                        )
+                    } else {
+                        format!(
+                            "LearnChain site URL: {}",
+                            app.config_form.learnchain_site_url
+                        )
+                    }),
+                );
+                items.insert(
+                    7,
+                    ListItem::new(if app.config_form.is_editing_learnchain_email() {
+                        format!(
+                            "LearnChain email (editing): {}",
+                            app.config_form.learnchain_email_buffer()
+                        )
+                    } else if app.config_form.learnchain_email.is_empty() {
+                        "LearnChain email: <not set>".to_string()
+                    } else {
+                        format!("LearnChain email: {}", app.config_form.learnchain_email)
+                    }),
+                );
+                items.insert(
+                    8,
+                    ListItem::new(if app.config_form.is_editing_learnchain_password() {
+                        format!(
+                            "LearnChain password (editing): {}",
+                            app.config_form.masked_learnchain_password_buffer()
+                        )
+                    } else {
+                        format!(
+                            "LearnChain password: {}",
+                            app.config_form.masked_learnchain_password()
+                        )
+                    }),
+                );
+            }
+        }
 
         // Add provider-specific fields
         match app.config_form.ai_provider {
@@ -1736,5 +2176,49 @@ fn format_tokens(tokens: usize) -> String {
         format!("~{}K", tokens / 1000)
     } else {
         format!("~{}", tokens)
+    }
+}
+
+fn strip_leading_toml_front_matter(markdown: &str) -> &str {
+    let mut lines = markdown.split_inclusive('\n');
+    let Some(first_line) = lines.next() else {
+        return markdown;
+    };
+
+    if first_line.trim_end_matches(|ch| ch == '\r' || ch == '\n') != "+++" {
+        return markdown;
+    }
+
+    let mut offset = first_line.len();
+    for line in lines {
+        offset += line.len();
+        if line.trim_end_matches(|ch| ch == '\r' || ch == '\n') == "+++" {
+            return markdown[offset..].trim_start_matches(|ch| ch == '\r' || ch == '\n');
+        }
+    }
+
+    markdown
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_leading_toml_front_matter;
+
+    #[test]
+    fn strip_leading_toml_front_matter_removes_delimited_header() {
+        let markdown = "+++\ntitle = \"Example\"\nreviewed_url_count = 0\n+++\n\n# Body\nContent";
+
+        let stripped = strip_leading_toml_front_matter(markdown);
+
+        assert_eq!(stripped, "# Body\nContent");
+    }
+
+    #[test]
+    fn strip_leading_toml_front_matter_leaves_plain_markdown_unchanged() {
+        let markdown = "# Title\n\nBody";
+
+        let stripped = strip_leading_toml_front_matter(markdown);
+
+        assert_eq!(stripped, markdown);
     }
 }

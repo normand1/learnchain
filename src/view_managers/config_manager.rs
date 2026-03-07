@@ -17,7 +17,7 @@ impl<'a> ConfigManager<'a> {
     pub(crate) fn show_config(&mut self) {
         self.app.config_form = ConfigForm::from_config(config::current());
         self.app.config_form.set_status(
-            "Use ←/→ to adjust values or cycle provider/model. Select an API key or model and press Enter to edit. s saves; m saves and returns.",
+            "Use ←/→ to adjust values or cycle repository/provider/model. Select a text field and press Enter to edit. For Notion, enter the destination database/page ID or full URL. For LearnChain, set the site URL plus your email/password after signing up at /login. s saves; m saves and returns.",
         );
         self.app.view = AppView::Config;
     }
@@ -48,6 +48,23 @@ impl<'a> ConfigManager<'a> {
             (KeyModifiers::NONE, KeyCode::Enter) => {
                 // Start editing if a text field is selected, otherwise save
                 match self.app.config_form.current_field() {
+                    ConfigField::DocumentRepositoryTarget => {
+                        self.app
+                            .config_form
+                            .start_editing_document_repository_target();
+                    }
+                    ConfigField::NotionApiToken => {
+                        self.app.config_form.start_editing_notion_api_token();
+                    }
+                    ConfigField::LearnChainSiteUrl => {
+                        self.app.config_form.start_editing_learnchain_site_url();
+                    }
+                    ConfigField::LearnChainEmail => {
+                        self.app.config_form.start_editing_learnchain_email();
+                    }
+                    ConfigField::LearnChainPassword => {
+                        self.app.config_form.start_editing_learnchain_password();
+                    }
                     ConfigField::OpenAiKey => {
                         self.app.config_form.start_editing_openai_key();
                     }
@@ -80,8 +97,127 @@ impl<'a> ConfigManager<'a> {
         }
     }
 
+    pub(crate) fn handle_paste(&mut self, text: &str) {
+        if !self.app.config_form.is_editing_text_field() {
+            return;
+        }
+
+        let sanitized: String = text
+            .chars()
+            .filter(|ch| *ch != '\n' && *ch != '\r')
+            .collect();
+        if sanitized.is_empty() {
+            return;
+        }
+
+        if self.app.config_form.is_editing_document_repository_target() {
+            for ch in sanitized.chars() {
+                self.app
+                    .config_form
+                    .push_document_repository_target_char(ch);
+            }
+        } else if self.app.config_form.is_editing_notion_api_token() {
+            for ch in sanitized.chars() {
+                self.app.config_form.push_notion_api_token_char(ch);
+            }
+        } else if self.app.config_form.is_editing_learnchain_site_url() {
+            for ch in sanitized.chars() {
+                self.app.config_form.push_learnchain_site_url_char(ch);
+            }
+        } else if self.app.config_form.is_editing_learnchain_email() {
+            for ch in sanitized.chars() {
+                self.app.config_form.push_learnchain_email_char(ch);
+            }
+        } else if self.app.config_form.is_editing_learnchain_password() {
+            for ch in sanitized.chars() {
+                self.app.config_form.push_learnchain_password_char(ch);
+            }
+        } else if self.app.config_form.is_editing_openai_key() {
+            for ch in sanitized.chars() {
+                self.app.config_form.push_openai_key_char(ch);
+            }
+        } else if self.app.config_form.is_editing_anthropic_key() {
+            for ch in sanitized.chars() {
+                self.app.config_form.push_anthropic_key_char(ch);
+            }
+        } else if self.app.config_form.is_editing_openrouter_key() {
+            for ch in sanitized.chars() {
+                self.app.config_form.push_openrouter_key_char(ch);
+            }
+        } else if self.app.config_form.is_editing_openrouter_model() {
+            for ch in sanitized.chars() {
+                self.app.config_form.push_openrouter_model_char(ch);
+            }
+        }
+    }
+
     fn handle_text_edit(&mut self, key: KeyEvent) {
-        if self.app.config_form.is_editing_openai_key() {
+        if self.app.config_form.is_editing_document_repository_target() {
+            match key.code {
+                KeyCode::Esc => self
+                    .app
+                    .config_form
+                    .cancel_document_repository_target_edit(),
+                KeyCode::Enter => self.app.config_form.apply_document_repository_target_edit(),
+                KeyCode::Backspace => self.app.config_form.backspace_document_repository_target(),
+                KeyCode::Char(ch) => {
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                        self.app
+                            .config_form
+                            .push_document_repository_target_char(ch);
+                    }
+                }
+                _ => {}
+            }
+        } else if self.app.config_form.is_editing_notion_api_token() {
+            match key.code {
+                KeyCode::Esc => self.app.config_form.cancel_notion_api_token_edit(),
+                KeyCode::Enter => self.app.config_form.apply_notion_api_token_edit(),
+                KeyCode::Backspace => self.app.config_form.backspace_notion_api_token(),
+                KeyCode::Char(ch) => {
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                        self.app.config_form.push_notion_api_token_char(ch);
+                    }
+                }
+                _ => {}
+            }
+        } else if self.app.config_form.is_editing_learnchain_site_url() {
+            match key.code {
+                KeyCode::Esc => self.app.config_form.cancel_learnchain_site_url_edit(),
+                KeyCode::Enter => self.app.config_form.apply_learnchain_site_url_edit(),
+                KeyCode::Backspace => self.app.config_form.backspace_learnchain_site_url(),
+                KeyCode::Char(ch) => {
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                        self.app.config_form.push_learnchain_site_url_char(ch);
+                    }
+                }
+                _ => {}
+            }
+        } else if self.app.config_form.is_editing_learnchain_email() {
+            match key.code {
+                KeyCode::Esc => self.app.config_form.cancel_learnchain_email_edit(),
+                KeyCode::Enter => self.app.config_form.apply_learnchain_email_edit(),
+                KeyCode::Backspace => self.app.config_form.backspace_learnchain_email(),
+                KeyCode::Char(ch) => {
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                        self.app.config_form.push_learnchain_email_char(ch);
+                    }
+                }
+                _ => {}
+            }
+        } else if self.app.config_form.is_editing_learnchain_password() {
+            match key.code {
+                KeyCode::Esc => self.app.config_form.cancel_learnchain_password_edit(),
+                KeyCode::Enter => self.app.config_form.apply_learnchain_password_edit(),
+                KeyCode::Backspace => self.app.config_form.backspace_learnchain_password(),
+                KeyCode::Char(ch) => {
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                        self.app.config_form.push_learnchain_password_char(ch);
+                    }
+                }
+                _ => {}
+            }
+        } else if self.app.config_form.is_editing_openai_key() {
             match key.code {
                 KeyCode::Esc => self.app.config_form.cancel_openai_key_edit(),
                 KeyCode::Enter => self.app.config_form.apply_openai_key_edit(),
@@ -145,6 +281,12 @@ impl<'a> ConfigManager<'a> {
         let target_sampling = self.app.config_form.sampling_percentage;
         let target_source = self.app.config_form.session_source;
         let target_write = self.app.config_form.write_output_artifacts;
+        let target_document_repository_kind = self.app.config_form.document_repository;
+        let target_document_repository = self.app.config_form.document_repository_target.clone();
+        let target_notion_api_token = self.app.config_form.notion_api_token.clone();
+        let target_learnchain_site_url = self.app.config_form.learnchain_site_url.clone();
+        let target_learnchain_email = self.app.config_form.learnchain_email.clone();
+        let target_learnchain_password = self.app.config_form.learnchain_password.clone();
         let target_provider = self.app.config_form.ai_provider;
         let target_openai_model = self.app.config_form.openai_model;
         let target_openai_key = self.app.config_form.openai_api_key.clone();
@@ -153,12 +295,49 @@ impl<'a> ConfigManager<'a> {
         let target_openrouter_model = self.app.config_form.openrouter_model.clone();
         let target_openrouter_key = self.app.config_form.openrouter_api_key.clone();
 
+        if let Err(err) = config::validate_document_repository_target(
+            target_document_repository_kind,
+            &target_document_repository,
+        ) {
+            App::push_error(
+                &mut self.app.error,
+                format!("Invalid document repository target: {}", err),
+            );
+            self.app
+                .config_form
+                .set_status(format!("Invalid document repository target. {}", err));
+            return;
+        }
+
+        if self.app.config_form.is_notion_target_selected()
+            && target_notion_api_token.trim().is_empty()
+        {
+            let help = config::notion_token_help_message().to_string();
+            App::push_error(&mut self.app.error, help.clone());
+            self.app.config_form.set_status(help);
+            return;
+        }
+
+        if self.app.config_form.is_learnchain_selected()
+            && let Err(err) = config::validate_learnchain_site_url(&target_learnchain_site_url)
+        {
+            App::push_error(&mut self.app.error, err.clone());
+            self.app.config_form.set_status(err);
+            return;
+        }
+
         match config::update(|config| {
             config.default_max_events = target_max;
             config.min_quiz_questions = target_min;
             config.sampling_percentage = target_sampling;
             config.session_source = target_source;
             config.write_output_artifacts = target_write;
+            config.document_repository = target_document_repository_kind;
+            config.document_repository_target = target_document_repository.clone();
+            config.notion_api_token = target_notion_api_token.clone();
+            config.learnchain_site_url = target_learnchain_site_url.clone();
+            config.learnchain_email = target_learnchain_email.clone();
+            config.learnchain_password = target_learnchain_password.clone();
             config.ai_provider = target_provider;
             config.openai_model = target_openai_model;
             config.openai_api_key = target_openai_key.clone();
@@ -172,16 +351,26 @@ impl<'a> ConfigManager<'a> {
                 self.app.reload_session_from_config();
                 let resolved_llm = self.app.config_form.resolved_llm();
 
-                self.app.config_form.set_status(format!(
-                    "Saved • Provider: {} • Model: {} • Key: {}",
-                    resolved_llm.provider.label(),
-                    resolved_llm.model_label,
-                    if resolved_llm.api_key.trim().is_empty() {
-                        "not set"
-                    } else {
-                        "set"
-                    }
-                ));
+                let status = if self.app.config_form.is_learnchain_selected()
+                    && (self.app.config_form.learnchain_email.trim().is_empty()
+                        || self.app.config_form.learnchain_password.is_empty())
+                {
+                    config::learnchain_credentials_help_message(
+                        &self.app.config_form.learnchain_site_url,
+                    )
+                } else {
+                    format!(
+                        "Saved • Provider: {} • Model: {} • Key: {}",
+                        resolved_llm.provider.label(),
+                        resolved_llm.model_label,
+                        if resolved_llm.api_key.trim().is_empty() {
+                            "not set"
+                        } else {
+                            "set"
+                        }
+                    )
+                };
+                self.app.config_form.set_status(status);
                 log_debug("App: configuration saved");
             }
             Err(err) => {

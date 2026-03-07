@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**LearnChain** is a terminal-based learning tool that turns your AI-assisted coding sessions into quizzes you can review inside a Ratatui interface. It reads session history from Codex CLI or Claude Code, summarizes the work, generates structured lessons with a Rig-backed LLM pipeline, and tracks what you have learned over time.
+**LearnChain** is a terminal-based learning tool that turns your AI-assisted coding sessions into quizzes and deep-dive writeups you can review inside a Ratatui interface. It reads session history from Codex CLI or Claude Code, summarizes the work, generates structured lessons and saved markdown deep dives with Rig-backed LLM workflows, and tracks what you have learned over time.
 
 ![Example Movie](readme_resources/example_mov.gif)
 
@@ -10,9 +10,11 @@
 
 - Parse coding sessions from both Codex CLI and Claude Code
 - Generate structured quizzes from your recent or selected historical sessions
+- Generate saved session deep dives with reviewed source links and teaching narratives
 - Support multiple LLM providers: OpenAI, Anthropic, and OpenRouter
 - Use [Rig](https://github.com/0xPlaygrounds/rig) for provider integration and structured output generation
 - Review lessons in an interactive terminal UI with quiz navigation and summaries
+- Browse previously generated deep dives from inside the TUI
 - Track learning history and first-attempt accuracy in a local SQLite database
 - Browse an analytics dashboard for recent learning activity
 - Persist configuration in `config/app_config.toml`
@@ -63,16 +65,30 @@ learnchain --clear-anthropic-key
 learnchain --clear-openrouter-key
 ```
 
+You can also configure a generic deep-dive export destination for future document repository integrations:
+
+```bash
+learnchain --set-document-repository notion
+learnchain --set-document-repository-target database/abcd1234
+learnchain --clear-document-repository
+learnchain --clear-document-repository-target
+learnchain --set-notion-api-token <token>
+learnchain --clear-notion-api-token
+```
+
 ## Usage
 
 The main menu currently supports these core flows:
 
-- Generate a learning response from your latest session activity
 - Select a historical session, grouped by project, and generate a quiz from it
+- Select a historical session, grouped by project, and generate a session deep dive from it
+- Open the Library view to browse previously saved deep dives and quiz artifacts
+- From the Library view, press `e` to send the selected artifact to the configured document repository
+- Open saved deep-dive history and reload previous markdown artifacts
 - Open the analytics dashboard
 - Configure provider, model, and app defaults
 
-Generated lessons can be written to `output/` when `Write artifacts to output` is enabled in the Config view. Learning history is stored in `output/learning_history.sqlite`.
+Quiz JSON artifacts can be written to `output/` when `Write quiz artifacts to output` is enabled in the Config view. Session deep dives are always saved to `output/deep-dives/`. The Config view now includes a `Document repository` selector. When `Notion` is selected, LearnChain shows separate fields for `Notion destination` and `Notion API token`. The Notion destination should be the target database/page ID or the full Notion URL, and the UI explains how to create an internal integration and connect it to the database. Library exports create a new page under that configured Notion destination and send the selected deep dive or quiz content into it. Learning history is stored in `output/learning_history.sqlite`.
 
 ## Debug Logging
 
@@ -134,9 +150,11 @@ learnchain/
 ├── src/
 │   ├── main.rs              # Entry point, app state, CLI handling
 │   ├── config.rs            # Configuration and provider/model resolution
-│   ├── llm/                 # Rig-backed learning generation
+│   ├── llm/                 # Rig-backed learning and deep-dive generation
 │   │   ├── mod.rs           # App-facing orchestration and background task handling
-│   │   ├── backend.rs       # Rig provider clients and structured generation
+│   │   ├── backend.rs       # Shared Rig provider clients and typed extraction
+│   │   ├── deep_dive.rs     # Session deep-dive workflow and markdown assembly
+│   │   ├── deep_dive_types.rs # Structured deep-dive payloads and artifact metadata
 │   │   └── types.rs         # Structured quiz payloads and usage types
 │   ├── knowledge_store.rs   # SQLite-backed learning history and analytics
 │   ├── session_manager.rs   # Session orchestration and loading
@@ -164,7 +182,9 @@ LearnChain stores settings in `config/app_config.toml`. Relevant settings includ
 - default event sampling and quiz sizing
 - active LLM provider
 - provider-specific model and API key fields
-- whether output artifacts should be persisted to disk
+- selected document repository and its repository-specific target
+- Notion API token for Notion-backed document targets
+- whether quiz JSON artifacts should be persisted to disk
 
 ## Contributing
 
@@ -178,8 +198,6 @@ Contributions are welcome. Before opening a PR:
 See [AGENTS.md](AGENTS.md) for coding standards and testing guidelines.
 
 ## License
-
-Copyright (c) Dave Norman <david.norman.w@gmail.com>
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
 

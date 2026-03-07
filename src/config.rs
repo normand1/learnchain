@@ -17,6 +17,18 @@ pub struct AppConfig {
     pub session_source: SessionSourceKind,
     #[serde(default = "default_write_output_artifacts_value")]
     pub write_output_artifacts: bool,
+    #[serde(default)]
+    pub document_repository: DocumentRepositoryKind,
+    #[serde(default)]
+    pub document_repository_target: String,
+    #[serde(default)]
+    pub notion_api_token: String,
+    #[serde(default = "default_learnchain_site_url")]
+    pub learnchain_site_url: String,
+    #[serde(default)]
+    pub learnchain_email: String,
+    #[serde(default)]
+    pub learnchain_password: String,
     // AI Provider selection
     #[serde(default)]
     pub ai_provider: AiProvider,
@@ -55,6 +67,29 @@ impl AppConfig {
         }
         if self.min_quiz_questions == 0 {
             self.min_quiz_questions = DEFAULT_MIN_QUIZ_QUESTIONS;
+        }
+        self.normalize_document_repository();
+        self.learnchain_site_url = normalize_learnchain_site_url(&self.learnchain_site_url);
+        self.learnchain_email = self.learnchain_email.trim().to_string();
+    }
+
+    fn normalize_document_repository(&mut self) {
+        if self.document_repository != DocumentRepositoryKind::None {
+            self.document_repository_target = self.document_repository_target.trim().to_string();
+            return;
+        }
+
+        let trimmed = self.document_repository_target.trim();
+        let Some((provider, target)) = trimmed.split_once(':') else {
+            self.document_repository_target = trimmed.to_string();
+            return;
+        };
+
+        if provider.trim().eq_ignore_ascii_case("notion") {
+            self.document_repository = DocumentRepositoryKind::Notion;
+            self.document_repository_target = target.trim().to_string();
+        } else {
+            self.document_repository_target = trimmed.to_string();
         }
     }
 
@@ -97,6 +132,12 @@ impl Default for AppConfig {
             min_quiz_questions: DEFAULT_MIN_QUIZ_QUESTIONS,
             session_source: default_session_source_kind(),
             write_output_artifacts: default_write_output_artifacts_value(),
+            document_repository: DocumentRepositoryKind::default(),
+            document_repository_target: String::new(),
+            notion_api_token: String::new(),
+            learnchain_site_url: default_learnchain_site_url(),
+            learnchain_email: String::new(),
+            learnchain_password: String::new(),
             ai_provider: AiProvider::default(),
             openai_model: default_openai_model_kind(),
             openai_api_key: String::new(),
@@ -109,8 +150,49 @@ impl Default for AppConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DocumentRepositoryKind {
+    #[default]
+    None,
+    Notion,
+    LearnChain,
+}
+
+impl DocumentRepositoryKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Notion => "Notion",
+            Self::LearnChain => "LearnChain",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::None => Self::Notion,
+            Self::Notion => Self::LearnChain,
+            Self::LearnChain => Self::None,
+        }
+    }
+
+    pub fn previous(self) -> Self {
+        self.next()
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
+            "notion" => Some(Self::Notion),
+            "learnchain" => Some(Self::LearnChain),
+            _ => None,
+        }
+    }
+}
+
 const DEFAULT_MAX_EVENTS: usize = 15;
 const DEFAULT_MIN_QUIZ_QUESTIONS: usize = 5;
+pub(crate) const LEARNCHAIN_DEFAULT_SITE_URL: &str = "http://localhost:3000";
 const fn default_session_source_kind() -> SessionSourceKind {
     SessionSourceKind::Codex
 }
@@ -122,6 +204,9 @@ const fn default_openai_model_kind() -> OpenAiModelKind {
 }
 const fn default_sampling_percentage() -> u8 {
     10
+}
+fn default_learnchain_site_url() -> String {
+    LEARNCHAIN_DEFAULT_SITE_URL.to_string()
 }
 const SYSTEM_PROMPT_TEMPLATE: &str = r#"You are a precise curriculum planner that helps the student learn coding concepts from the provided session summary.
 Use the session summary as the source of truth and produce a structured learning response using the fields provided by the calling system.
@@ -351,6 +436,12 @@ pub(crate) enum ConfigField {
     SamplingPercentage,
     SessionSource,
     OutputArtifacts,
+    DocumentRepository,
+    DocumentRepositoryTarget,
+    NotionApiToken,
+    LearnChainSiteUrl,
+    LearnChainEmail,
+    LearnChainPassword,
     AiProvider,
     OpenAiModel,
     OpenAiKey,
@@ -367,6 +458,22 @@ pub struct ConfigForm {
     pub(crate) sampling_percentage: u8,
     pub(crate) session_source: SessionSourceKind,
     pub(crate) write_output_artifacts: bool,
+    pub(crate) document_repository: DocumentRepositoryKind,
+    pub(crate) document_repository_target: String,
+    pub(crate) notion_api_token: String,
+    pub(crate) learnchain_site_url: String,
+    pub(crate) learnchain_email: String,
+    pub(crate) learnchain_password: String,
+    editing_document_repository_target: bool,
+    document_repository_target_buffer: String,
+    editing_notion_api_token: bool,
+    notion_api_token_buffer: String,
+    editing_learnchain_site_url: bool,
+    learnchain_site_url_buffer: String,
+    editing_learnchain_email: bool,
+    learnchain_email_buffer: String,
+    editing_learnchain_password: bool,
+    learnchain_password_buffer: String,
     // Provider selection
     pub(crate) ai_provider: AiProvider,
     // OpenAI
@@ -400,6 +507,22 @@ impl ConfigForm {
             sampling_percentage: config.sampling_percentage,
             session_source: config.session_source,
             write_output_artifacts: config.write_output_artifacts,
+            document_repository: config.document_repository,
+            document_repository_target: config.document_repository_target,
+            notion_api_token: config.notion_api_token,
+            learnchain_site_url: config.learnchain_site_url,
+            learnchain_email: config.learnchain_email,
+            learnchain_password: config.learnchain_password,
+            editing_document_repository_target: false,
+            document_repository_target_buffer: String::new(),
+            editing_notion_api_token: false,
+            notion_api_token_buffer: String::new(),
+            editing_learnchain_site_url: false,
+            learnchain_site_url_buffer: String::new(),
+            editing_learnchain_email: false,
+            learnchain_email_buffer: String::new(),
+            editing_learnchain_password: false,
+            learnchain_password_buffer: String::new(),
             ai_provider: config.ai_provider,
             openai_model: config.openai_model,
             openai_api_key: config.openai_api_key,
@@ -456,8 +579,25 @@ impl ConfigForm {
             ConfigField::SamplingPercentage,
             ConfigField::SessionSource,
             ConfigField::OutputArtifacts,
-            ConfigField::AiProvider,
+            ConfigField::DocumentRepository,
         ];
+
+        if self.document_repository != DocumentRepositoryKind::None {
+            match self.document_repository {
+                DocumentRepositoryKind::Notion => {
+                    fields.push(ConfigField::DocumentRepositoryTarget);
+                    fields.push(ConfigField::NotionApiToken);
+                }
+                DocumentRepositoryKind::LearnChain => {
+                    fields.push(ConfigField::LearnChainSiteUrl);
+                    fields.push(ConfigField::LearnChainEmail);
+                    fields.push(ConfigField::LearnChainPassword);
+                }
+                DocumentRepositoryKind::None => {}
+            }
+        }
+
+        fields.push(ConfigField::AiProvider);
 
         match self.ai_provider {
             AiProvider::OpenAI => {
@@ -522,6 +662,45 @@ impl ConfigForm {
                 self.write_output_artifacts = !self.write_output_artifacts;
                 self.dirty = true;
                 self.status = None;
+            }
+            ConfigField::DocumentRepository => {
+                let updated = if delta > 0 {
+                    self.document_repository.next()
+                } else {
+                    self.document_repository.previous()
+                };
+                if updated != self.document_repository {
+                    self.document_repository = updated;
+                    if self.document_repository == DocumentRepositoryKind::LearnChain
+                        && self.learnchain_site_url.trim().is_empty()
+                    {
+                        self.learnchain_site_url = default_learnchain_site_url();
+                    }
+                    self.dirty = true;
+                    self.status = match self.document_repository {
+                        DocumentRepositoryKind::LearnChain
+                            if self.learnchain_email.trim().is_empty()
+                                || self.learnchain_password.is_empty() =>
+                        {
+                            Some(learnchain_credentials_help_message(
+                                &self.learnchain_site_url,
+                            ))
+                        }
+                        _ => None,
+                    };
+                    self.field = ConfigField::DocumentRepository;
+                }
+            }
+            ConfigField::DocumentRepositoryTarget => {
+                // This field requires text editing, not adjustment.
+            }
+            ConfigField::NotionApiToken => {
+                // This field requires text editing, not adjustment.
+            }
+            ConfigField::LearnChainSiteUrl
+            | ConfigField::LearnChainEmail
+            | ConfigField::LearnChainPassword => {
+                // These fields require text editing, not adjustment.
             }
             ConfigField::AiProvider => {
                 let updated = if delta > 0 {
@@ -603,6 +782,22 @@ impl ConfigForm {
         self.sampling_percentage = config.sampling_percentage;
         self.session_source = config.session_source;
         self.write_output_artifacts = config.write_output_artifacts;
+        self.document_repository = config.document_repository;
+        self.document_repository_target = config.document_repository_target;
+        self.notion_api_token = config.notion_api_token;
+        self.learnchain_site_url = config.learnchain_site_url;
+        self.learnchain_email = config.learnchain_email;
+        self.learnchain_password = config.learnchain_password;
+        self.editing_document_repository_target = false;
+        self.document_repository_target_buffer.clear();
+        self.editing_notion_api_token = false;
+        self.notion_api_token_buffer.clear();
+        self.editing_learnchain_site_url = false;
+        self.learnchain_site_url_buffer.clear();
+        self.editing_learnchain_email = false;
+        self.learnchain_email_buffer.clear();
+        self.editing_learnchain_password = false;
+        self.learnchain_password_buffer.clear();
         self.ai_provider = config.ai_provider;
         self.openai_model = config.openai_model;
         self.openai_api_key = config.openai_api_key;
@@ -628,6 +823,276 @@ impl ConfigForm {
 
     pub(crate) fn is_editing_openai_key(&self) -> bool {
         self.editing_openai_key
+    }
+
+    pub(crate) fn is_editing_document_repository_target(&self) -> bool {
+        self.editing_document_repository_target
+    }
+
+    pub(crate) fn is_notion_target_selected(&self) -> bool {
+        self.document_repository == DocumentRepositoryKind::Notion
+    }
+
+    pub(crate) fn is_learnchain_selected(&self) -> bool {
+        self.document_repository == DocumentRepositoryKind::LearnChain
+    }
+
+    pub(crate) fn start_editing_document_repository_target(&mut self) {
+        self.editing_document_repository_target = true;
+        self.document_repository_target_buffer = self.document_repository_target.clone();
+        self.status = Some(match self.document_repository {
+            DocumentRepositoryKind::Notion => {
+                "Editing Notion destination. Enter the database/page ID or full URL (Enter to save, Esc to cancel).".to_string()
+            }
+            DocumentRepositoryKind::LearnChain => {
+                "Editing document repository target (Enter to save, Esc to cancel).".to_string()
+            }
+            DocumentRepositoryKind::None => {
+                "Editing document repository target (Enter to save, Esc to cancel).".to_string()
+            }
+        });
+    }
+
+    pub(crate) fn cancel_document_repository_target_edit(&mut self) {
+        self.editing_document_repository_target = false;
+        self.document_repository_target_buffer.clear();
+        self.status = Some("Cancelled document repository target edit.".to_string());
+    }
+
+    pub(crate) fn apply_document_repository_target_edit(&mut self) {
+        let new_value = self.document_repository_target_buffer.trim().to_string();
+        if new_value != self.document_repository_target {
+            self.document_repository_target = new_value;
+            self.dirty = true;
+            self.status = Some(match self.document_repository {
+                DocumentRepositoryKind::Notion => "Updated Notion destination.".to_string(),
+                DocumentRepositoryKind::LearnChain => {
+                    "Updated document repository target.".to_string()
+                }
+                DocumentRepositoryKind::None => "Updated document repository target.".to_string(),
+            });
+        } else {
+            self.status = Some(match self.document_repository {
+                DocumentRepositoryKind::Notion => "Notion destination unchanged.".to_string(),
+                DocumentRepositoryKind::LearnChain => {
+                    "Document repository target unchanged.".to_string()
+                }
+                DocumentRepositoryKind::None => "Document repository target unchanged.".to_string(),
+            });
+        }
+        self.editing_document_repository_target = false;
+        self.document_repository_target_buffer.clear();
+    }
+
+    pub(crate) fn backspace_document_repository_target(&mut self) {
+        self.document_repository_target_buffer.pop();
+        self.status = Some(match self.document_repository {
+            DocumentRepositoryKind::Notion => "Editing Notion destination...".to_string(),
+            DocumentRepositoryKind::LearnChain => {
+                "Editing document repository target...".to_string()
+            }
+            DocumentRepositoryKind::None => "Editing document repository target...".to_string(),
+        });
+    }
+
+    pub(crate) fn push_document_repository_target_char(&mut self, ch: char) {
+        self.document_repository_target_buffer.push(ch);
+        self.status = Some(match self.document_repository {
+            DocumentRepositoryKind::Notion => "Editing Notion destination...".to_string(),
+            DocumentRepositoryKind::LearnChain => {
+                "Editing document repository target...".to_string()
+            }
+            DocumentRepositoryKind::None => "Editing document repository target...".to_string(),
+        });
+    }
+
+    pub(crate) fn document_repository_target_buffer(&self) -> &str {
+        &self.document_repository_target_buffer
+    }
+
+    pub(crate) fn is_editing_notion_api_token(&self) -> bool {
+        self.editing_notion_api_token
+    }
+
+    pub(crate) fn start_editing_notion_api_token(&mut self) {
+        self.editing_notion_api_token = true;
+        self.notion_api_token_buffer = self.notion_api_token.clone();
+        self.status = Some("Editing Notion API token (Enter to save, Esc to cancel)".to_string());
+    }
+
+    pub(crate) fn cancel_notion_api_token_edit(&mut self) {
+        self.editing_notion_api_token = false;
+        self.notion_api_token_buffer.clear();
+        self.status = Some("Cancelled Notion API token edit.".to_string());
+    }
+
+    pub(crate) fn apply_notion_api_token_edit(&mut self) {
+        let new_value = self.notion_api_token_buffer.trim().to_string();
+        if new_value != self.notion_api_token {
+            self.notion_api_token = new_value;
+            self.dirty = true;
+            self.status = Some("Updated Notion API token.".to_string());
+        } else {
+            self.status = Some("Notion API token unchanged.".to_string());
+        }
+        self.editing_notion_api_token = false;
+        self.notion_api_token_buffer.clear();
+    }
+
+    pub(crate) fn backspace_notion_api_token(&mut self) {
+        self.notion_api_token_buffer.pop();
+        self.status = Some("Editing Notion API token...".to_string());
+    }
+
+    pub(crate) fn push_notion_api_token_char(&mut self, ch: char) {
+        self.notion_api_token_buffer.push(ch);
+        self.status = Some("Editing Notion API token...".to_string());
+    }
+
+    pub(crate) fn masked_notion_api_token(&self) -> String {
+        mask_secret(&self.notion_api_token)
+    }
+
+    pub(crate) fn masked_notion_api_token_buffer(&self) -> String {
+        mask_secret(&self.notion_api_token_buffer)
+    }
+
+    pub(crate) fn is_editing_learnchain_site_url(&self) -> bool {
+        self.editing_learnchain_site_url
+    }
+
+    pub(crate) fn start_editing_learnchain_site_url(&mut self) {
+        self.editing_learnchain_site_url = true;
+        self.learnchain_site_url_buffer = self.learnchain_site_url.clone();
+        self.status =
+            Some("Editing LearnChain site URL (Enter to save, Esc to cancel)".to_string());
+    }
+
+    pub(crate) fn cancel_learnchain_site_url_edit(&mut self) {
+        self.editing_learnchain_site_url = false;
+        self.learnchain_site_url_buffer.clear();
+        self.status = Some("Cancelled LearnChain site URL edit.".to_string());
+    }
+
+    pub(crate) fn apply_learnchain_site_url_edit(&mut self) {
+        let new_value = normalize_learnchain_site_url(&self.learnchain_site_url_buffer);
+        if new_value != self.learnchain_site_url {
+            self.learnchain_site_url = new_value;
+            self.dirty = true;
+            self.status = Some(format!(
+                "Updated LearnChain site URL. Signup URL: {}",
+                learnchain_signup_url(&self.learnchain_site_url)
+            ));
+        } else {
+            self.status = Some("LearnChain site URL unchanged.".to_string());
+        }
+        self.editing_learnchain_site_url = false;
+        self.learnchain_site_url_buffer.clear();
+    }
+
+    pub(crate) fn backspace_learnchain_site_url(&mut self) {
+        self.learnchain_site_url_buffer.pop();
+        self.status = Some("Editing LearnChain site URL...".to_string());
+    }
+
+    pub(crate) fn push_learnchain_site_url_char(&mut self, ch: char) {
+        self.learnchain_site_url_buffer.push(ch);
+        self.status = Some("Editing LearnChain site URL...".to_string());
+    }
+
+    pub(crate) fn learnchain_site_url_buffer(&self) -> &str {
+        &self.learnchain_site_url_buffer
+    }
+
+    pub(crate) fn is_editing_learnchain_email(&self) -> bool {
+        self.editing_learnchain_email
+    }
+
+    pub(crate) fn start_editing_learnchain_email(&mut self) {
+        self.editing_learnchain_email = true;
+        self.learnchain_email_buffer = self.learnchain_email.clone();
+        self.status = Some("Editing LearnChain email (Enter to save, Esc to cancel)".to_string());
+    }
+
+    pub(crate) fn cancel_learnchain_email_edit(&mut self) {
+        self.editing_learnchain_email = false;
+        self.learnchain_email_buffer.clear();
+        self.status = Some("Cancelled LearnChain email edit.".to_string());
+    }
+
+    pub(crate) fn apply_learnchain_email_edit(&mut self) {
+        let new_value = self.learnchain_email_buffer.trim().to_string();
+        if new_value != self.learnchain_email {
+            self.learnchain_email = new_value;
+            self.dirty = true;
+            self.status = Some("Updated LearnChain email.".to_string());
+        } else {
+            self.status = Some("LearnChain email unchanged.".to_string());
+        }
+        self.editing_learnchain_email = false;
+        self.learnchain_email_buffer.clear();
+    }
+
+    pub(crate) fn backspace_learnchain_email(&mut self) {
+        self.learnchain_email_buffer.pop();
+        self.status = Some("Editing LearnChain email...".to_string());
+    }
+
+    pub(crate) fn push_learnchain_email_char(&mut self, ch: char) {
+        self.learnchain_email_buffer.push(ch);
+        self.status = Some("Editing LearnChain email...".to_string());
+    }
+
+    pub(crate) fn learnchain_email_buffer(&self) -> &str {
+        &self.learnchain_email_buffer
+    }
+
+    pub(crate) fn is_editing_learnchain_password(&self) -> bool {
+        self.editing_learnchain_password
+    }
+
+    pub(crate) fn start_editing_learnchain_password(&mut self) {
+        self.editing_learnchain_password = true;
+        self.learnchain_password_buffer = self.learnchain_password.clone();
+        self.status =
+            Some("Editing LearnChain password (Enter to save, Esc to cancel)".to_string());
+    }
+
+    pub(crate) fn cancel_learnchain_password_edit(&mut self) {
+        self.editing_learnchain_password = false;
+        self.learnchain_password_buffer.clear();
+        self.status = Some("Cancelled LearnChain password edit.".to_string());
+    }
+
+    pub(crate) fn apply_learnchain_password_edit(&mut self) {
+        let new_value = self.learnchain_password_buffer.clone();
+        if new_value != self.learnchain_password {
+            self.learnchain_password = new_value;
+            self.dirty = true;
+            self.status = Some("Updated LearnChain password.".to_string());
+        } else {
+            self.status = Some("LearnChain password unchanged.".to_string());
+        }
+        self.editing_learnchain_password = false;
+        self.learnchain_password_buffer.clear();
+    }
+
+    pub(crate) fn backspace_learnchain_password(&mut self) {
+        self.learnchain_password_buffer.pop();
+        self.status = Some("Editing LearnChain password...".to_string());
+    }
+
+    pub(crate) fn push_learnchain_password_char(&mut self, ch: char) {
+        self.learnchain_password_buffer.push(ch);
+        self.status = Some("Editing LearnChain password...".to_string());
+    }
+
+    pub(crate) fn masked_learnchain_password(&self) -> String {
+        mask_password(&self.learnchain_password)
+    }
+
+    pub(crate) fn masked_learnchain_password_buffer(&self) -> String {
+        mask_password(&self.learnchain_password_buffer)
     }
 
     pub(crate) fn start_editing_openai_key(&mut self) {
@@ -815,7 +1280,12 @@ impl ConfigForm {
 
     /// Returns true if any text field is currently being edited.
     pub(crate) fn is_editing_text_field(&self) -> bool {
-        self.editing_openai_key
+        self.editing_document_repository_target
+            || self.editing_notion_api_token
+            || self.editing_learnchain_site_url
+            || self.editing_learnchain_email
+            || self.editing_learnchain_password
+            || self.editing_openai_key
             || self.editing_anthropic_key
             || self.editing_openrouter_key
             || self.editing_openrouter_model
@@ -845,6 +1315,83 @@ fn mask_secret(value: &str) -> String {
             .collect();
         format!("{}{}", "*".repeat(len.saturating_sub(4)), suffix)
     }
+}
+
+fn mask_password(value: &str) -> String {
+    if value.is_empty() {
+        "<not set>".to_string()
+    } else {
+        "****".to_string()
+    }
+}
+
+pub(crate) fn validate_document_repository_target(
+    repository: DocumentRepositoryKind,
+    value: &str,
+) -> std::result::Result<(), String> {
+    if repository == DocumentRepositoryKind::None {
+        return Ok(());
+    }
+
+    if repository == DocumentRepositoryKind::LearnChain {
+        return Ok(());
+    }
+
+    if value.trim().is_empty() {
+        return Err(match repository {
+            DocumentRepositoryKind::Notion => {
+                "For Notion, enter the destination database/page ID or the full Notion URL."
+                    .to_string()
+            }
+            DocumentRepositoryKind::LearnChain => {
+                "Document repository target cannot be empty.".to_string()
+            }
+            DocumentRepositoryKind::None => {
+                "Document repository target cannot be empty.".to_string()
+            }
+        });
+    }
+
+    Ok(())
+}
+
+pub(crate) fn notion_token_help_message() -> &'static str {
+    "Notion export requires a Notion API token. Select \"Notion API token\" and press Enter. In Notion, create an internal integration, copy its token, and connect that integration to the target database."
+}
+
+pub(crate) fn validate_learnchain_site_url(value: &str) -> std::result::Result<(), String> {
+    let normalized = normalize_learnchain_site_url(value);
+    let url = reqwest::Url::parse(&normalized)
+        .map_err(|_| "Enter a valid LearnChain URL like http://localhost:3000.".to_string())?;
+
+    match url.scheme() {
+        "http" | "https" => Ok(()),
+        _ => Err("LearnChain URL must start with http:// or https://.".to_string()),
+    }
+}
+
+pub(crate) fn learnchain_signup_url(site_url: &str) -> String {
+    format!(
+        "{}/login",
+        normalize_learnchain_site_url(site_url).trim_end_matches('/')
+    )
+}
+
+pub(crate) fn learnchain_credentials_help_message(site_url: &str) -> String {
+    format!(
+        "LearnChain upload requires an account. Sign up at {}, choose \"Create account\", then set LearnChain email and password here.",
+        learnchain_signup_url(site_url)
+    )
+}
+
+fn normalize_learnchain_site_url(value: &str) -> String {
+    let trimmed = value.trim();
+    let resolved = if trimmed.is_empty() {
+        LEARNCHAIN_DEFAULT_SITE_URL
+    } else {
+        trimmed
+    };
+    resolved.trim_end_matches('/').to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -984,5 +1531,237 @@ mod tests {
                 .missing_key_help()
                 .contains("--set-openrouter-key")
         );
+    }
+
+    #[test]
+    fn app_config_default_document_repository_settings_are_initialized() {
+        let config = AppConfig::default();
+        assert_eq!(config.document_repository, DocumentRepositoryKind::None);
+        assert!(config.document_repository_target.is_empty());
+        assert_eq!(config.learnchain_site_url, LEARNCHAIN_DEFAULT_SITE_URL);
+        assert!(config.learnchain_email.is_empty());
+        assert!(config.learnchain_password.is_empty());
+    }
+
+    #[test]
+    fn document_repository_target_validation_accepts_empty_for_none_and_text_for_notion() {
+        assert!(validate_document_repository_target(DocumentRepositoryKind::None, "").is_ok());
+        assert!(
+            validate_document_repository_target(DocumentRepositoryKind::LearnChain, "").is_ok()
+        );
+        assert!(
+            validate_document_repository_target(DocumentRepositoryKind::Notion, "database/abc")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn document_repository_target_validation_rejects_empty_values_for_selected_repository() {
+        assert!(validate_document_repository_target(DocumentRepositoryKind::Notion, "").is_err());
+        assert!(
+            validate_document_repository_target(DocumentRepositoryKind::Notion, "   ").is_err()
+        );
+    }
+
+    #[test]
+    fn config_form_round_trips_document_repository_target() {
+        let config = AppConfig {
+            document_repository: DocumentRepositoryKind::Notion,
+            document_repository_target: "database/abc".to_string(),
+            notion_api_token: "secret_notion".to_string(),
+            ..AppConfig::default()
+        };
+        let mut form = ConfigForm::from_config(config.clone());
+        assert_eq!(form.document_repository, DocumentRepositoryKind::Notion);
+        assert_eq!(form.document_repository_target, "database/abc");
+        assert_eq!(form.notion_api_token, "secret_notion");
+
+        form.apply_saved(config);
+        assert_eq!(form.document_repository, DocumentRepositoryKind::Notion);
+        assert_eq!(form.document_repository_target, "database/abc");
+        assert_eq!(form.notion_api_token, "secret_notion");
+        assert!(!form.is_editing_document_repository_target());
+    }
+
+    #[test]
+    fn config_form_visible_fields_hide_repository_target_when_no_repository_is_selected() {
+        let form = ConfigForm::from_config(AppConfig::default());
+        assert_eq!(
+            form.visible_fields(),
+            vec![
+                ConfigField::MaxEvents,
+                ConfigField::MinQuiz,
+                ConfigField::SamplingPercentage,
+                ConfigField::SessionSource,
+                ConfigField::OutputArtifacts,
+                ConfigField::DocumentRepository,
+                ConfigField::AiProvider,
+                ConfigField::OpenAiModel,
+                ConfigField::OpenAiKey,
+            ]
+        );
+    }
+
+    #[test]
+    fn config_form_visible_fields_include_document_repository_target_for_selected_repository() {
+        let form = ConfigForm::from_config(AppConfig {
+            document_repository: DocumentRepositoryKind::Notion,
+            document_repository_target: "database/abc".to_string(),
+            ..AppConfig::default()
+        });
+        assert_eq!(
+            form.visible_fields(),
+            vec![
+                ConfigField::MaxEvents,
+                ConfigField::MinQuiz,
+                ConfigField::SamplingPercentage,
+                ConfigField::SessionSource,
+                ConfigField::OutputArtifacts,
+                ConfigField::DocumentRepository,
+                ConfigField::DocumentRepositoryTarget,
+                ConfigField::NotionApiToken,
+                ConfigField::AiProvider,
+                ConfigField::OpenAiModel,
+                ConfigField::OpenAiKey,
+            ]
+        );
+    }
+
+    #[test]
+    fn config_form_visible_fields_include_learnchain_fields_for_selected_repository() {
+        let form = ConfigForm::from_config(AppConfig {
+            document_repository: DocumentRepositoryKind::LearnChain,
+            ..AppConfig::default()
+        });
+        assert_eq!(
+            form.visible_fields(),
+            vec![
+                ConfigField::MaxEvents,
+                ConfigField::MinQuiz,
+                ConfigField::SamplingPercentage,
+                ConfigField::SessionSource,
+                ConfigField::OutputArtifacts,
+                ConfigField::DocumentRepository,
+                ConfigField::LearnChainSiteUrl,
+                ConfigField::LearnChainEmail,
+                ConfigField::LearnChainPassword,
+                ConfigField::AiProvider,
+                ConfigField::OpenAiModel,
+                ConfigField::OpenAiKey,
+            ]
+        );
+    }
+
+    #[test]
+    fn document_repository_target_edit_marks_form_dirty_only_on_change() {
+        let mut form = ConfigForm::from_config(AppConfig::default());
+        form.document_repository = DocumentRepositoryKind::Notion;
+        form.start_editing_document_repository_target();
+        for ch in "database/abc".chars() {
+            form.push_document_repository_target_char(ch);
+        }
+        form.apply_document_repository_target_edit();
+        assert!(form.dirty);
+        assert_eq!(form.document_repository_target, "database/abc");
+
+        form.dirty = false;
+        form.start_editing_document_repository_target();
+        form.apply_document_repository_target_edit();
+        assert!(!form.dirty);
+    }
+
+    #[test]
+    fn config_form_document_repository_selector_cycles_supported_repositories() {
+        let mut form = ConfigForm::from_config(AppConfig::default());
+        assert_eq!(form.document_repository, DocumentRepositoryKind::None);
+
+        form.field = ConfigField::DocumentRepository;
+        form.adjust_current(1);
+        assert_eq!(form.document_repository, DocumentRepositoryKind::Notion);
+
+        form.adjust_current(1);
+        assert_eq!(form.document_repository, DocumentRepositoryKind::LearnChain);
+
+        form.adjust_current(1);
+        assert_eq!(form.document_repository, DocumentRepositoryKind::None);
+    }
+
+    #[test]
+    fn learnchain_signup_url_uses_normalized_site_url() {
+        assert_eq!(
+            learnchain_signup_url("http://localhost:3000/"),
+            "http://localhost:3000/login"
+        );
+    }
+
+    #[test]
+    fn app_config_normalize_migrates_legacy_prefixed_notion_target() {
+        let mut config: AppConfig = toml::from_str(
+            r#"
+default_max_events = 15
+min_quiz_questions = 5
+session_source = "codex"
+write_output_artifacts = false
+document_repository_target = "notion:database/abc"
+ai_provider = "open_a_i"
+openai_model = "gpt5-mini"
+openai_api_key = ""
+anthropic_model = "claude-sonnet4"
+anthropic_api_key = ""
+openrouter_model = ""
+openrouter_api_key = ""
+sampling_percentage = 10
+"#,
+        )
+        .unwrap();
+
+        config.normalize();
+        assert_eq!(config.document_repository, DocumentRepositoryKind::Notion);
+        assert_eq!(config.document_repository_target, "database/abc");
+    }
+
+    #[test]
+    fn notion_api_token_edit_marks_form_dirty_only_on_change() {
+        let mut form = ConfigForm::from_config(AppConfig::default());
+        form.start_editing_notion_api_token();
+        for ch in "secret_notion".chars() {
+            form.push_notion_api_token_char(ch);
+        }
+        form.apply_notion_api_token_edit();
+        assert!(form.dirty);
+        assert_eq!(form.notion_api_token, "secret_notion");
+
+        form.dirty = false;
+        form.start_editing_notion_api_token();
+        form.apply_notion_api_token_edit();
+        assert!(!form.dirty);
+    }
+
+    #[test]
+    fn app_config_deserializes_without_document_repository_target() {
+        let config: AppConfig = toml::from_str(
+            r#"
+default_max_events = 15
+min_quiz_questions = 5
+session_source = "codex"
+write_output_artifacts = false
+document_repository = "none"
+ai_provider = "open_a_i"
+openai_model = "gpt5-mini"
+openai_api_key = ""
+anthropic_model = "claude-sonnet4"
+anthropic_api_key = ""
+openrouter_model = ""
+openrouter_api_key = ""
+sampling_percentage = 10
+"#,
+        )
+        .unwrap();
+
+        assert!(config.document_repository_target.is_empty());
+        assert!(config.notion_api_token.is_empty());
+        assert_eq!(config.learnchain_site_url, LEARNCHAIN_DEFAULT_SITE_URL);
+        assert!(config.learnchain_email.is_empty());
+        assert!(config.learnchain_password.is_empty());
     }
 }

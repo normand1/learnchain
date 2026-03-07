@@ -11,14 +11,17 @@ use rig::{
     completion::TypedPrompt,
     providers::{anthropic, openai, openrouter},
 };
+use schemars::JsonSchema;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::{
-    AiTaskMessage, config,
+    AiTaskKind, AiTaskMessage, config,
     config::{AiProvider, ResolvedLlmConfig},
     log_util::log_debug,
 };
 
-use super::types::{LearningGenerationResult, StructuredLearningResponse};
+use super::types::{LearningGenerationResult, LlmUsage, StructuredLearningResponse};
 
 const EXTRACTOR_RETRIES: u64 = 1;
 const LLM_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
@@ -31,14 +34,14 @@ enum RigProviderClient {
 }
 
 #[derive(Debug, Clone)]
-pub struct LearningGenerator {
+pub struct LlmBackend {
     client: RigProviderClient,
     provider: AiProvider,
     model_name: String,
     output_root: PathBuf,
 }
 
-impl LearningGenerator {
+impl LlmBackend {
     pub fn from_config(
         resolved: ResolvedLlmConfig,
         output_root: impl Into<PathBuf>,
@@ -111,32 +114,67 @@ impl LearningGenerator {
             summary
         };
 
-        if let Some(s) = sender {
-            send_progress(s, "Preparing structured learning request...", 40);
+        if let Some(sender) = sender {
+            send_progress(
+                sender,
+                AiTaskKind::LearningLesson,
+                "Preparing structured learning request...",
+                40,
+            );
         }
 
-        let prompt = build_prompt(&summary_content);
-        if let Some(s) = sender {
-            send_progress(s, "Waiting for provider response...", 55);
-        }
-        let result = self.extract_learning_response(&prompt).await?;
-
-        if let Some(s) = sender {
-            send_progress(s, "Validating structured learning response...", 85);
-        }
-
-        if let Some(usage) = result.usage.as_ref() {
-            log_debug(&format!(
-                "LearningGenerator: {} {} tokens in={} out={} total={}",
-                self.provider.label(),
-                self.model_name,
-                usage.input_tokens,
-                usage.output_tokens,
-                usage.total_tokens
-            ));
+        let prompt = build_learning_prompt(&summary_content);
+        if let Some(sender) = sender {
+            send_progress(
+                sender,
+                AiTaskKind::LearningLesson,
+                "Waiting for provider response...",
+                55,
+            );
         }
 
-        Ok(result)
+        let (response, usage) = self
+            .extract_typed::<StructuredLearningResponse>(
+                &config::system_prompt(),
+                &prompt,
+                "structured learning response",
+            )
+            .await?;
+
+        if let Some(sender) = sender {
+            send_progress(
+                sender,
+                AiTaskKind::LearningLesson,
+                "Validating structured learning response...",
+                85,
+            );
+        }
+
+        self.log_usage("LearningGenerator", usage.as_ref());
+        Ok(LearningGenerationResult { response, usage })
+    }
+
+    pub(crate) async fn extract_typed<T>(
+        &self,
+        preamble: &str,
+        prompt: &str,
+        error_context: &str,
+    ) -> Result<(T, Option<LlmUsage>)>
+    where
+        T: DeserializeOwned + Serialize + JsonSchema + Send + Sync + 'static,
+    {
+        match &self.client {
+            RigProviderClient::OpenAi(client) => {
+                extract_with_client(client, &self.model_name, preamble, prompt, error_context).await
+            }
+            RigProviderClient::Anthropic(client) => {
+                extract_with_client(client, &self.model_name, preamble, prompt, error_context).await
+            }
+            RigProviderClient::OpenRouter(client) => {
+                extract_with_openrouter(client, &self.model_name, preamble, prompt, error_context)
+                    .await
+            }
+        }
     }
 
     fn latest_markdown_file(&self) -> Result<PathBuf> {
@@ -160,14 +198,10 @@ impl LearningGenerator {
                 .wrap_err_with(|| format!("failed to read modified time for {}", path.display()))?;
 
             newest = match newest {
-                Some((current_time, current_path)) => {
-                    if modified > current_time {
-                        Some((modified, path))
-                    } else {
-                        Some((current_time, current_path))
-                    }
+                Some((current_time, current_path)) if modified <= current_time => {
+                    Some((current_time, current_path))
                 }
-                None => Some((modified, path)),
+                _ => Some((modified, path)),
             };
         }
 
@@ -176,46 +210,46 @@ impl LearningGenerator {
             .ok_or_else(|| eyre!("no markdown files found in {}", root.display()))
     }
 
-    async fn extract_learning_response(&self, prompt: &str) -> Result<LearningGenerationResult> {
-        match &self.client {
-            RigProviderClient::OpenAi(client) => {
-                extract_with_client(client, &self.model_name, prompt).await
-            }
-            RigProviderClient::Anthropic(client) => {
-                extract_with_client(client, &self.model_name, prompt).await
-            }
-            RigProviderClient::OpenRouter(client) => {
-                extract_with_openrouter(client, &self.model_name, prompt).await
-            }
+    fn log_usage(&self, label: &str, usage: Option<&LlmUsage>) {
+        if let Some(usage) = usage {
+            log_debug(&format!(
+                "{}: {} {} tokens in={} out={} total={}",
+                label,
+                self.provider.label(),
+                self.model_name,
+                usage.input_tokens,
+                usage.output_tokens,
+                usage.total_tokens
+            ));
         }
     }
 }
 
-fn build_prompt(summary: &str) -> String {
+fn build_learning_prompt(summary: &str) -> String {
     format!(
         "Generate a structured learning response from the following session summary.\n\nSession summary:\n```markdown\n{}\n```",
         summary
     )
 }
 
-async fn extract_with_client<C>(
+async fn extract_with_client<C, T>(
     client: &C,
     model_name: &str,
+    preamble: &str,
     prompt: &str,
-) -> Result<LearningGenerationResult>
+    error_context: &str,
+) -> Result<(T, Option<LlmUsage>)>
 where
     C: CompletionClient,
+    T: DeserializeOwned + Serialize + JsonSchema + Send + Sync + 'static,
 {
     let agent = client
         .agent(model_name.to_string())
-        .preamble(&config::system_prompt())
+        .preamble(preamble)
         .build();
 
     let response = tokio::time::timeout(LLM_REQUEST_TIMEOUT, async {
-        agent
-            .prompt_typed::<StructuredLearningResponse>(prompt)
-            .extended_details()
-            .await
+        agent.prompt_typed::<T>(prompt).extended_details().await
     })
     .await
     .map_err(|_| {
@@ -224,23 +258,25 @@ where
             LLM_REQUEST_TIMEOUT.as_secs()
         )
     })?
-    .wrap_err("failed to deserialize structured learning response")?;
+    .wrap_err_with(|| format!("failed to deserialize {}", error_context))?;
 
-    Ok(LearningGenerationResult {
-        response: response.output,
-        usage: Some(response.usage.into()),
-    })
+    Ok((response.output, Some(response.usage.into())))
 }
 
-async fn extract_with_openrouter(
+async fn extract_with_openrouter<T>(
     client: &openrouter::Client,
     model_name: &str,
+    preamble: &str,
     prompt: &str,
-) -> Result<LearningGenerationResult> {
+    error_context: &str,
+) -> Result<(T, Option<LlmUsage>)>
+where
+    T: DeserializeOwned + Serialize + JsonSchema + Send + Sync + 'static,
+{
     let response = tokio::time::timeout(LLM_REQUEST_TIMEOUT, async {
         client
-            .extractor::<StructuredLearningResponse>(model_name.to_string())
-            .preamble(&config::system_prompt())
+            .extractor::<T>(model_name.to_string())
+            .preamble(preamble)
             .retries(EXTRACTOR_RETRIES)
             .build()
             .extract_with_usage(prompt)
@@ -253,12 +289,9 @@ async fn extract_with_openrouter(
             LLM_REQUEST_TIMEOUT.as_secs()
         )
     })?
-    .wrap_err("failed to extract structured learning response")?;
+    .wrap_err_with(|| format!("failed to extract {}", error_context))?;
 
-    Ok(LearningGenerationResult {
-        response: response.data,
-        usage: Some(response.usage.into()),
-    })
+    Ok((response.data, Some(response.usage.into())))
 }
 
 fn is_markdown(path: &Path) -> bool {
@@ -268,8 +301,8 @@ fn is_markdown(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn send_progress(sender: &Sender<AiTaskMessage>, message: &str, percent: u8) {
-    let _ = sender.send(AiTaskMessage::Progress(message.to_string(), percent));
+fn send_progress(sender: &Sender<AiTaskMessage>, kind: AiTaskKind, message: &str, percent: u8) {
+    let _ = sender.send(AiTaskMessage::Progress(kind, message.to_string(), percent));
 }
 
 #[cfg(test)]
@@ -286,7 +319,7 @@ mod tests {
             api_key: String::new(),
         };
 
-        let result = LearningGenerator::from_config(resolved, "output");
+        let result = LlmBackend::from_config(resolved, "output");
         assert!(result.is_err());
         assert!(
             result
@@ -298,7 +331,7 @@ mod tests {
 
     #[test]
     fn build_prompt_includes_summary_without_raw_schema() {
-        let prompt = build_prompt("## Session\nUpdated foo.rs");
+        let prompt = build_learning_prompt("## Session\nUpdated foo.rs");
         assert!(prompt.contains("Updated foo.rs"));
         assert!(!prompt.contains("\"additionalProperties\""));
         assert!(!prompt.contains("provided schema"));

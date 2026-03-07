@@ -1,4 +1,5 @@
 mod config;
+mod document_repository;
 mod knowledge_store;
 mod llm;
 mod log_util;
@@ -12,26 +13,31 @@ mod view_managers;
 use color_eyre::Result;
 use config::ConfigForm;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use document_repository::poll_export_messages;
 use dotenvy::dotenv;
 use knowledge_store::KnowledgeAnalytics;
 use llm::{
-    LearningGenerationResult, LearningGenerator, StructuredLearningResponse, poll_ai_messages,
+    DeepDiveDocument, DeepDiveGenerationResult, DeepDiveHistoryEntry, LearningGenerationResult,
+    LlmBackend, StructuredLearningResponse, poll_ai_messages,
 };
-use output_manager::OutputManager;
+use output_manager::{LibraryArtifactEntry, OutputManager};
 use ratatui::{DefaultTerminal, Frame};
 use session_manager::SessionManager;
 use session_sources::{Session, SessionEvent, SessionLoad};
 use std::{
     collections::HashSet,
     path::PathBuf,
-    sync::mpsc::Receiver,
+    sync::mpsc::{Receiver, Sender},
     time::{Duration, Instant},
 };
 use ui_renderer::UiRenderer;
-use view_managers::{AnalyticsManager, ConfigManager, LearningManager, MenuManager};
+use view_managers::{
+    AnalyticsManager, ConfigManager, DeepDiveManager, LearningManager, LibraryManager, MenuManager,
+    SessionPickerManager,
+};
 
 pub(crate) const AI_LOADING_FRAMES: [&str; 4] = ["-", "\\", "|", "/"];
-const HELP_TEXT: &str = "learnchain options:\n  --debug, -d               write runtime debug logs to output/learnchain-debug.log\n  --set-openai-key <key>    store your OpenAI API key\n  --clear-openai-key        remove the stored OpenAI API key\n  --set-anthropic-key <key> store your Anthropic API key\n  --clear-anthropic-key     remove the stored Anthropic API key\n  --set-openrouter-key <key> store your OpenRouter API key\n  --clear-openrouter-key    remove the stored OpenRouter API key\n  --help                    show this message\n  --version                 show version";
+const HELP_TEXT: &str = "learnchain options:\n  --debug, -d               write runtime debug logs to output/learnchain-debug.log\n  --set-openai-key <key>    store your OpenAI API key\n  --clear-openai-key        remove the stored OpenAI API key\n  --set-anthropic-key <key> store your Anthropic API key\n  --clear-anthropic-key     remove the stored Anthropic API key\n  --set-openrouter-key <key> store your OpenRouter API key\n  --clear-openrouter-key    remove the stored OpenRouter API key\n  --set-document-repository <none|notion|learnchain>\n                           store the selected document repository\n  --clear-document-repository\n                           clear the selected document repository and target\n  --set-document-repository-target <target>\n                           store the document repository target\n  --clear-document-repository-target\n                           remove the stored document repository target\n  --set-notion-api-token <token>\n                           store the Notion API token for Notion exports\n  --clear-notion-api-token\n                           remove the stored Notion API token\n  --set-learnchain-site-url <url>\n                           store the LearnChain site URL (for example http://localhost:3000)\n  --clear-learnchain-site-url\n                           reset the LearnChain site URL to its default\n  --set-learnchain-email <email>\n                           store the LearnChain email used for document upload\n  --clear-learnchain-email\n                           remove the stored LearnChain email\n  --set-learnchain-password <password>\n                           store the LearnChain password used for document upload\n  --clear-learnchain-password\n                           remove the stored LearnChain password\n  --help                    show this message\n  --version                 show version";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CliCommand {
@@ -41,6 +47,18 @@ enum CliCommand {
     ClearAnthropicKey,
     SetOpenRouterKey(String),
     ClearOpenRouterKey,
+    SetDocumentRepository(config::DocumentRepositoryKind),
+    ClearDocumentRepository,
+    SetDocumentRepositoryTarget(String),
+    ClearDocumentRepositoryTarget,
+    SetNotionApiToken(String),
+    ClearNotionApiToken,
+    SetLearnChainSiteUrl(String),
+    ClearLearnChainSiteUrl,
+    SetLearnChainEmail(String),
+    ClearLearnChainEmail,
+    SetLearnChainPassword(String),
+    ClearLearnChainPassword,
     Help,
     Version,
 }
@@ -55,16 +73,38 @@ struct CliOptions {
 pub(crate) enum AppView {
     Menu,
     Events,
+    SessionPicker,
     Learning,
+    DeepDive,
+    Library,
     Config,
     Analytics,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionSelectionTarget {
+    Quiz,
+    DeepDive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AiTaskKind {
+    LearningLesson,
+    SessionDeepDive,
+}
+
 #[derive(Debug)]
 pub(crate) enum AiTaskMessage {
-    Success(LearningGenerationResult),
+    LearningSuccess(LearningGenerationResult),
+    DeepDiveSuccess(DeepDiveGenerationResult),
+    Error(AiTaskKind, String),
+    Progress(AiTaskKind, String, u8), // (kind, message, percentage)
+}
+
+#[derive(Debug)]
+pub(crate) enum DocumentExportMessage {
+    Success(document_repository::RepositoryExportResult),
     Error(String),
-    Progress(String, u8), // (message, percentage)
 }
 
 pub(crate) fn reset_learning_feedback(
@@ -125,6 +165,75 @@ fn main() -> color_eyre::Result<()> {
                 println!("Cleared OpenRouter API key from config/app_config.toml.");
                 return Ok(());
             }
+            CliCommand::SetDocumentRepository(repository) => {
+                config::update(|cfg| cfg.document_repository = repository)?;
+                println!("Stored document repository in config/app_config.toml.");
+                return Ok(());
+            }
+            CliCommand::ClearDocumentRepository => {
+                config::update(|cfg| {
+                    cfg.document_repository = config::DocumentRepositoryKind::None;
+                    cfg.document_repository_target.clear();
+                })?;
+                println!("Cleared document repository from config/app_config.toml.");
+                return Ok(());
+            }
+            CliCommand::SetDocumentRepositoryTarget(target) => {
+                let trimmed = target.trim().to_string();
+                let current = config::current();
+                config::validate_document_repository_target(current.document_repository, &trimmed)
+                    .map_err(|err| color_eyre::eyre::eyre!(err))?;
+                config::update(|cfg| cfg.document_repository_target = trimmed.clone())?;
+                println!("Stored document repository target in config/app_config.toml.");
+                return Ok(());
+            }
+            CliCommand::ClearDocumentRepositoryTarget => {
+                config::update(|cfg| cfg.document_repository_target.clear())?;
+                println!("Cleared document repository target from config/app_config.toml.");
+                return Ok(());
+            }
+            CliCommand::SetNotionApiToken(token) => {
+                config::update(|cfg| cfg.notion_api_token = token.trim().to_string())?;
+                println!("Stored Notion API token in config/app_config.toml.");
+                return Ok(());
+            }
+            CliCommand::ClearNotionApiToken => {
+                config::update(|cfg| cfg.notion_api_token.clear())?;
+                println!("Cleared Notion API token from config/app_config.toml.");
+                return Ok(());
+            }
+            CliCommand::SetLearnChainSiteUrl(url) => {
+                config::validate_learnchain_site_url(&url)
+                    .map_err(|err| color_eyre::eyre::eyre!(err))?;
+                config::update(|cfg| cfg.learnchain_site_url = url.trim().to_string())?;
+                println!("Stored LearnChain site URL in config/app_config.toml.");
+                return Ok(());
+            }
+            CliCommand::ClearLearnChainSiteUrl => {
+                config::update(|cfg| cfg.learnchain_site_url.clear())?;
+                println!("Reset LearnChain site URL in config/app_config.toml.");
+                return Ok(());
+            }
+            CliCommand::SetLearnChainEmail(email) => {
+                config::update(|cfg| cfg.learnchain_email = email.trim().to_string())?;
+                println!("Stored LearnChain email in config/app_config.toml.");
+                return Ok(());
+            }
+            CliCommand::ClearLearnChainEmail => {
+                config::update(|cfg| cfg.learnchain_email.clear())?;
+                println!("Cleared LearnChain email from config/app_config.toml.");
+                return Ok(());
+            }
+            CliCommand::SetLearnChainPassword(password) => {
+                config::update(|cfg| cfg.learnchain_password = password.clone())?;
+                println!("Stored LearnChain password in config/app_config.toml.");
+                return Ok(());
+            }
+            CliCommand::ClearLearnChainPassword => {
+                config::update(|cfg| cfg.learnchain_password.clear())?;
+                println!("Cleared LearnChain password from config/app_config.toml.");
+                return Ok(());
+            }
             CliCommand::Help => {
                 println!("{}", HELP_TEXT);
                 return Ok(());
@@ -139,8 +248,10 @@ fn main() -> color_eyre::Result<()> {
     dotenv().ok();
     color_eyre::install()?;
     log_util::log_debug("App: starting TUI application");
+    crossterm::execute!(std::io::stdout(), event::EnableBracketedPaste)?;
     let terminal = ratatui::init();
     let result = App::new().run(terminal);
+    let _ = crossterm::execute!(std::io::stdout(), event::DisableBracketedPaste);
     ratatui::restore();
     result
 }
@@ -192,6 +303,98 @@ fn parse_cli_options(args: &[String]) -> std::result::Result<CliOptions, String>
             }
             "--clear-openrouter-key" => {
                 set_command(&mut options.command, CliCommand::ClearOpenRouterKey)?;
+                index += 1;
+            }
+            "--set-document-repository" => {
+                let repository = args.get(index + 1).ok_or_else(|| {
+                    "Usage: learnchain --set-document-repository <none|notion|learnchain>"
+                        .to_string()
+                })?;
+                let repository =
+                    config::DocumentRepositoryKind::parse(repository).ok_or_else(|| {
+                        "Document repository must be one of: none, notion, learnchain.".to_string()
+                    })?;
+                set_command(
+                    &mut options.command,
+                    CliCommand::SetDocumentRepository(repository),
+                )?;
+                index += 2;
+            }
+            "--clear-document-repository" => {
+                set_command(&mut options.command, CliCommand::ClearDocumentRepository)?;
+                index += 1;
+            }
+            "--set-document-repository-target" => {
+                let target = args.get(index + 1).ok_or_else(|| {
+                    "Usage: learnchain --set-document-repository-target <target>".to_string()
+                })?;
+                set_command(
+                    &mut options.command,
+                    CliCommand::SetDocumentRepositoryTarget(target.clone()),
+                )?;
+                index += 2;
+            }
+            "--clear-document-repository-target" => {
+                set_command(
+                    &mut options.command,
+                    CliCommand::ClearDocumentRepositoryTarget,
+                )?;
+                index += 1;
+            }
+            "--set-notion-api-token" => {
+                let token = args.get(index + 1).ok_or_else(|| {
+                    "Usage: learnchain --set-notion-api-token <token>".to_string()
+                })?;
+                set_command(
+                    &mut options.command,
+                    CliCommand::SetNotionApiToken(token.clone()),
+                )?;
+                index += 2;
+            }
+            "--clear-notion-api-token" => {
+                set_command(&mut options.command, CliCommand::ClearNotionApiToken)?;
+                index += 1;
+            }
+            "--set-learnchain-site-url" => {
+                let url = args.get(index + 1).ok_or_else(|| {
+                    "Usage: learnchain --set-learnchain-site-url <url>".to_string()
+                })?;
+                set_command(
+                    &mut options.command,
+                    CliCommand::SetLearnChainSiteUrl(url.clone()),
+                )?;
+                index += 2;
+            }
+            "--clear-learnchain-site-url" => {
+                set_command(&mut options.command, CliCommand::ClearLearnChainSiteUrl)?;
+                index += 1;
+            }
+            "--set-learnchain-email" => {
+                let email = args.get(index + 1).ok_or_else(|| {
+                    "Usage: learnchain --set-learnchain-email <email>".to_string()
+                })?;
+                set_command(
+                    &mut options.command,
+                    CliCommand::SetLearnChainEmail(email.clone()),
+                )?;
+                index += 2;
+            }
+            "--clear-learnchain-email" => {
+                set_command(&mut options.command, CliCommand::ClearLearnChainEmail)?;
+                index += 1;
+            }
+            "--set-learnchain-password" => {
+                let password = args.get(index + 1).ok_or_else(|| {
+                    "Usage: learnchain --set-learnchain-password <password>".to_string()
+                })?;
+                set_command(
+                    &mut options.command,
+                    CliCommand::SetLearnChainPassword(password.clone()),
+                )?;
+                index += 2;
+            }
+            "--clear-learnchain-password" => {
+                set_command(&mut options.command, CliCommand::ClearLearnChainPassword)?;
                 index += 1;
             }
             "--help" | "-h" => {
@@ -261,11 +464,13 @@ pub struct App {
     /// Current AI provider selection.
     pub(crate) ai_provider: config::AiProvider,
     /// Lazily configured LLM integration.
-    pub(crate) learning_generator: Option<LearningGenerator>,
+    pub(crate) llm_backend: Option<LlmBackend>,
     /// Latest status message related to AI generation requests.
     pub(crate) ai_status: Option<String>,
     /// Indicates whether an AI request is currently running.
     pub(crate) ai_loading: bool,
+    /// The active AI task kind, when loading is in progress.
+    pub(crate) ai_task_kind: Option<AiTaskKind>,
     /// Spinner frame index for the active loading indicator.
     pub(crate) ai_loading_frame: usize,
     /// When the AI loading started, for elapsed time display.
@@ -276,6 +481,12 @@ pub struct App {
     pub(crate) ai_progress_message: String,
     /// Receives background AI task updates.
     pub(crate) ai_result_receiver: Option<Receiver<AiTaskMessage>>,
+    /// Sends background AI task updates from spawned workers.
+    pub(crate) ai_sender: Option<Sender<AiTaskMessage>>,
+    /// Receives background document export updates.
+    pub(crate) document_export_receiver: Option<Receiver<DocumentExportMessage>>,
+    /// Indicates whether a document export is currently running.
+    pub(crate) document_export_loading: bool,
     /// Cached learning response from the most recent AI generation.
     pub(crate) learning_response: Option<StructuredLearningResponse>,
     /// Index of the currently selected knowledge group within the learning response.
@@ -290,16 +501,16 @@ pub struct App {
     pub(crate) learning_summary_revealed: bool,
     /// Indicates that the correct answer was chosen and we are waiting to advance.
     pub(crate) learning_waiting_for_next: bool,
-    /// Whether the learning view is showing session selection (true) or quiz (false).
-    pub(crate) learning_selecting_session: bool,
-    /// Index of selected session in learning session selection view.
-    pub(crate) learning_selected_session: Option<usize>,
+    /// The active target for the shared session picker.
+    pub(crate) session_selection_target: Option<SessionSelectionTarget>,
+    /// Index of selected session in shared session picker view.
+    pub(crate) session_picker_selected_session: Option<usize>,
     /// Projects grouped by cwd for session selection.
     pub(crate) projects: Vec<Project>,
-    /// Index of selected project in learning project selection view.
-    pub(crate) learning_selected_project: Option<usize>,
+    /// Index of selected project in shared session picker view.
+    pub(crate) session_picker_selected_project: Option<usize>,
     /// Whether viewing projects list (true) or sessions within a project (false).
-    pub(crate) learning_viewing_projects: bool,
+    pub(crate) session_picker_viewing_projects: bool,
     /// Holds the editable configuration state when rendering the config view.
     pub(crate) config_form: ConfigForm,
     /// Whether artifacts should be written to disk.
@@ -328,6 +539,22 @@ pub struct App {
     pub(crate) learning_showing_summary: bool,
     /// Summary results for display after quiz completion.
     pub(crate) quiz_summary_results: Vec<QuizSummaryResult>,
+    /// Most recently generated or opened deep dive document.
+    pub(crate) deep_dive_document: Option<DeepDiveDocument>,
+    /// History-loaded deep dive temporarily overlaid on top of the current document.
+    pub(crate) deep_dive_history_document: Option<DeepDiveDocument>,
+    /// Scroll offset within the active deep dive markdown view.
+    pub(crate) deep_dive_scroll: u16,
+    /// Previously generated deep-dive artifacts discovered on disk.
+    pub(crate) deep_dive_history: Vec<DeepDiveHistoryEntry>,
+    /// Selected history row within deep-dive history mode.
+    pub(crate) deep_dive_history_selected: Option<usize>,
+    /// Whether the deep-dive view is currently showing history list mode.
+    pub(crate) deep_dive_showing_history: bool,
+    /// All saved artifacts available in the library view.
+    pub(crate) library_artifacts: Vec<LibraryArtifactEntry>,
+    /// Selected row within the library view.
+    pub(crate) library_selected: Option<usize>,
 }
 
 /// Stores the result of a single quiz question for the summary screen.
@@ -441,10 +668,10 @@ impl App {
         let session_manager = SessionManager::from_source(config_snapshot.session_source);
         let session_load = session_manager.load_today_events();
 
-        let learning_generator = if resolved_llm.api_key.trim().is_empty() {
+        let llm_backend = if resolved_llm.api_key.trim().is_empty() {
             None
         } else {
-            match LearningGenerator::from_config(resolved_llm.clone(), "output") {
+            match LlmBackend::from_config(resolved_llm.clone(), "output") {
                 Ok(generator) => Some(generator),
                 Err(err) => {
                     Self::push_error(&mut aggregated_error, format!("AI unavailable: {}", err));
@@ -470,14 +697,18 @@ impl App {
             summary_content: None,
             error: None,
             ai_provider,
-            learning_generator,
+            llm_backend,
             ai_status: None,
             ai_loading: false,
+            ai_task_kind: None,
             ai_loading_frame: 0,
             ai_loading_start: None,
             ai_progress_percent: 0,
             ai_progress_message: String::new(),
             ai_result_receiver: None,
+            ai_sender: None,
+            document_export_receiver: None,
+            document_export_loading: false,
             learning_response: None,
             learning_group_index: 0,
             learning_quiz_index: 0,
@@ -485,11 +716,11 @@ impl App {
             learning_feedback: None,
             learning_summary_revealed: false,
             learning_waiting_for_next: false,
-            learning_selecting_session: false,
-            learning_selected_session: None,
+            session_selection_target: None,
+            session_picker_selected_session: None,
             projects: Vec::new(),
-            learning_selected_project: None,
-            learning_viewing_projects: true,
+            session_picker_selected_project: None,
+            session_picker_viewing_projects: true,
             config_form: ConfigForm::from_config(config_snapshot.clone()),
             write_output_artifacts,
             openai_model,
@@ -504,12 +735,20 @@ impl App {
             last_quiz_event_timestamp: None,
             learning_showing_summary: false,
             quiz_summary_results: Vec::new(),
+            deep_dive_document: None,
+            deep_dive_history_document: None,
+            deep_dive_scroll: 0,
+            deep_dive_history: Vec::new(),
+            deep_dive_history_selected: None,
+            deep_dive_showing_history: false,
+            library_artifacts: Vec::new(),
+            library_selected: None,
         };
 
         app.apply_session_load(session_load);
 
         // Set appropriate help message if API key is not configured
-        if app.learning_generator.is_none() && resolved_llm.api_key.trim().is_empty() {
+        if app.llm_backend.is_none() && resolved_llm.api_key.trim().is_empty() {
             app.ai_status = Some(ai_provider.missing_key_help().to_string());
         } else {
             app.ai_status = None;
@@ -528,6 +767,7 @@ impl App {
         let tick_rate = Duration::from_millis(120);
         while self.running {
             poll_ai_messages(&mut self);
+            poll_export_messages(&mut self);
             terminal.draw(|frame| self.render(frame))?;
             self.handle_crossterm_events(tick_rate)?;
         }
@@ -578,12 +818,12 @@ impl App {
         let resolved_llm = config_snapshot.resolved_llm();
 
         if resolved_llm.api_key.trim().is_empty() {
-            self.learning_generator = None;
+            self.llm_backend = None;
             let help = self.ai_provider.missing_key_help().to_string();
             App::push_error(&mut self.error, help.clone());
             self.ai_status = Some(help);
         } else {
-            self.learning_generator = LearningGenerator::from_config(resolved_llm, "output").ok();
+            self.llm_backend = LlmBackend::from_config(resolved_llm, "output").ok();
             self.ai_status = None;
         }
 
@@ -601,11 +841,13 @@ impl App {
         if event::poll(tick_rate)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => self.on_key_event(key),
+                Event::Paste(text) => self.on_paste_event(text),
                 Event::Mouse(_) => {}
                 Event::Resize(_, _) => {}
                 _ => {}
             }
             poll_ai_messages(self);
+            poll_export_messages(self);
         } else {
             self.on_tick();
         }
@@ -618,6 +860,7 @@ impl App {
             self.update_loading_status();
         }
         poll_ai_messages(self);
+        poll_export_messages(self);
     }
 
     /// Handles the key events and updates the state of [`App`].
@@ -628,10 +871,19 @@ impl App {
             _ => match self.view {
                 AppView::Menu => MenuManager::new(self).handle_menu_key(key),
                 AppView::Events => MenuManager::new(self).handle_events_key(key),
+                AppView::SessionPicker => SessionPickerManager::new(self).handle_key(key),
                 AppView::Learning => LearningManager::new(self).handle_key(key),
+                AppView::DeepDive => DeepDiveManager::new(self).handle_key(key),
+                AppView::Library => LibraryManager::new(self).handle_key(key),
                 AppView::Config => ConfigManager::new(self).handle_key(key),
                 AppView::Analytics => AnalyticsManager::new(self).handle_key(key),
             },
+        }
+    }
+
+    fn on_paste_event(&mut self, text: String) {
+        if matches!(self.view, AppView::Config) {
+            ConfigManager::new(self).handle_paste(&text);
         }
     }
 
@@ -640,8 +892,13 @@ impl App {
             self.config_form = ConfigForm::from_config(config::current());
         }
         self.learning_showing_summary = false;
-        self.learning_selecting_session = false;
-        self.learning_viewing_projects = true;
+        self.session_selection_target = None;
+        self.session_picker_selected_session = None;
+        self.session_picker_viewing_projects = true;
+        self.deep_dive_showing_history = false;
+        self.deep_dive_history_document = None;
+        self.deep_dive_scroll = 0;
+        self.library_selected = None;
         self.quiz_summary_results.clear();
         self.view = AppView::Menu;
     }
@@ -659,6 +916,27 @@ impl App {
         } else {
             *slot = Some(message);
         }
+    }
+
+    pub(crate) fn active_deep_dive_document(&self) -> Option<&DeepDiveDocument> {
+        self.deep_dive_history_document
+            .as_ref()
+            .or(self.deep_dive_document.as_ref())
+    }
+
+    pub(crate) fn show_deep_dive_document(&mut self, document: DeepDiveDocument) {
+        self.deep_dive_document = Some(document);
+        self.deep_dive_history_document = None;
+        self.deep_dive_showing_history = false;
+        self.deep_dive_scroll = 0;
+        self.view = AppView::DeepDive;
+    }
+
+    pub(crate) fn show_history_deep_dive_document(&mut self, document: DeepDiveDocument) {
+        self.deep_dive_history_document = Some(document);
+        self.deep_dive_showing_history = false;
+        self.deep_dive_scroll = 0;
+        self.view = AppView::DeepDive;
     }
 
     pub(crate) fn record_quiz_first_attempt(
@@ -796,5 +1074,109 @@ mod tests {
     fn parse_cli_options_rejects_multiple_commands() {
         let error = parse_cli_options(&args(&["--help", "--version"])).unwrap_err();
         assert!(error.contains("Multiple commands"));
+    }
+
+    #[test]
+    fn parse_cli_options_supports_setting_document_repository_target() {
+        let options =
+            parse_cli_options(&args(&["--set-document-repository-target", "database/abc"]))
+                .unwrap();
+
+        assert_eq!(
+            options.command,
+            Some(CliCommand::SetDocumentRepositoryTarget(
+                "database/abc".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_cli_options_supports_clearing_document_repository_target() {
+        let options = parse_cli_options(&args(&["--clear-document-repository-target"])).unwrap();
+        assert_eq!(
+            options.command,
+            Some(CliCommand::ClearDocumentRepositoryTarget)
+        );
+    }
+
+    #[test]
+    fn parse_cli_options_supports_setting_notion_api_token() {
+        let options = parse_cli_options(&args(&["--set-notion-api-token", "secret_test"])).unwrap();
+        assert_eq!(
+            options.command,
+            Some(CliCommand::SetNotionApiToken("secret_test".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_cli_options_supports_clearing_notion_api_token() {
+        let options = parse_cli_options(&args(&["--clear-notion-api-token"])).unwrap();
+        assert_eq!(options.command, Some(CliCommand::ClearNotionApiToken));
+    }
+
+    #[test]
+    fn parse_cli_options_supports_setting_document_repository() {
+        let options = parse_cli_options(&args(&["--set-document-repository", "notion"])).unwrap();
+        assert_eq!(
+            options.command,
+            Some(CliCommand::SetDocumentRepository(
+                config::DocumentRepositoryKind::Notion
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_cli_options_supports_setting_learnchain_repository() {
+        let options =
+            parse_cli_options(&args(&["--set-document-repository", "learnchain"])).unwrap();
+        assert_eq!(
+            options.command,
+            Some(CliCommand::SetDocumentRepository(
+                config::DocumentRepositoryKind::LearnChain
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_cli_options_supports_setting_learnchain_site_url() {
+        let options = parse_cli_options(&args(&[
+            "--set-learnchain-site-url",
+            "http://localhost:3000",
+        ]))
+        .unwrap();
+        assert_eq!(
+            options.command,
+            Some(CliCommand::SetLearnChainSiteUrl(
+                "http://localhost:3000".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_cli_options_supports_setting_learnchain_email() {
+        let options =
+            parse_cli_options(&args(&["--set-learnchain-email", "learner@example.com"])).unwrap();
+        assert_eq!(
+            options.command,
+            Some(CliCommand::SetLearnChainEmail(
+                "learner@example.com".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_cli_options_supports_setting_learnchain_password() {
+        let options =
+            parse_cli_options(&args(&["--set-learnchain-password", "secret-pass"])).unwrap();
+        assert_eq!(
+            options.command,
+            Some(CliCommand::SetLearnChainPassword("secret-pass".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_cli_options_supports_clearing_document_repository() {
+        let options = parse_cli_options(&args(&["--clear-document-repository"])).unwrap();
+        assert_eq!(options.command, Some(CliCommand::ClearDocumentRepository));
     }
 }

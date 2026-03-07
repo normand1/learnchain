@@ -1,7 +1,13 @@
 mod backend;
+pub(crate) mod deep_dive;
+pub(crate) mod deep_dive_types;
 pub(crate) mod types;
 
-pub(crate) use backend::LearningGenerator;
+pub(crate) use backend::LlmBackend;
+pub(crate) use deep_dive_types::{
+    DeepDiveArtifactMetadata, DeepDiveDocument, DeepDiveGenerationResult, DeepDiveHistoryEntry,
+    DeepDiveResearchPlan, DeepDiveReviewedSource, StructuredDeepDiveResponse,
+};
 pub(crate) use types::{LearningGenerationResult, StructuredLearningResponse};
 
 use std::{
@@ -16,11 +22,12 @@ use color_eyre::eyre::{Result, WrapErr, eyre};
 use serde_json::to_string_pretty;
 
 use crate::{
-    AI_LOADING_FRAMES, AiTaskMessage, App, AppView, knowledge_store, log_util::log_debug,
-    output_manager::OutputManager, reset_learning_feedback, view_managers::LearningManager,
+    AI_LOADING_FRAMES, AiTaskKind, AiTaskMessage, App, AppView, knowledge_store,
+    log_util::log_debug, output_manager::OutputManager, reset_learning_feedback,
+    session_sources::Session, view_managers::LearningManager,
 };
 
-pub(crate) fn handle_ai_success(app: &mut App, mut result: LearningGenerationResult) {
+pub(crate) fn handle_learning_success(app: &mut App, mut result: LearningGenerationResult) {
     LearningManager::shuffle_quiz_options(&mut result.response);
     let usage = result.usage.clone();
     let structured = result.response;
@@ -94,29 +101,63 @@ pub(crate) fn handle_ai_success(app: &mut App, mut result: LearningGenerationRes
     app.analytics_refreshed_at = None;
     app.learning_response = Some(structured);
     app.last_quiz_event_timestamp = app.last_event_timestamp.clone();
+    app.view = AppView::Learning;
     log_debug(&format!(
         "App: loaded learning response with {} group(s)",
         group_count
     ));
-
-    app.view = AppView::Learning;
-    log_debug("App: switched to learning view");
 }
 
-pub(crate) fn handle_ai_error(app: &mut App, message: String) {
+pub(crate) fn handle_deep_dive_success(app: &mut App, result: DeepDiveGenerationResult) {
+    let usage = result.usage.clone();
+    let reviewed_failures = result.reviewed_source_failures;
+    let document = result.document;
+    let mut status_parts = vec![
+        format!("Saved to {}", document.path.display()),
+        format!(
+            "Referenced URLs: {}",
+            document.metadata.referenced_url_count
+        ),
+        format!("Reviewed URLs: {}", document.metadata.reviewed_url_count),
+    ];
+    if !reviewed_failures.is_empty() {
+        status_parts.push(format!("Fetch failures: {}", reviewed_failures.len()));
+    }
+    if let Some(usage) = usage {
+        status_parts.push(format!("Tokens: {}", usage.total_tokens));
+    }
+    app.ai_status = Some(status_parts.join(" • "));
+    app.show_deep_dive_document(document);
+    log_debug("App: loaded deep-dive document");
+}
+
+pub(crate) fn handle_ai_error(app: &mut App, kind: AiTaskKind, message: String) {
     let trimmed = message.trim().to_string();
+    let status_label = match kind {
+        AiTaskKind::LearningLesson => "AI generation failed",
+        AiTaskKind::SessionDeepDive => "Deep-dive generation failed",
+    };
     if trimmed.starts_with("Failed to build Tokio runtime") {
         App::push_error(&mut app.error, trimmed.clone());
         log_debug(&format!("App: {}", trimmed));
         app.ai_status = Some("Unable to start AI runtime".to_string());
     } else {
-        App::push_error(&mut app.error, format!("AI generation failed: {}", trimmed));
-        log_debug(&format!("App: AI generation error: {}", trimmed));
-        app.ai_status = Some("AI generation failed".to_string());
+        App::push_error(&mut app.error, format!("{}: {}", status_label, trimmed));
+        log_debug(&format!("App: {}: {}", status_label, trimmed));
+        app.ai_status = Some(status_label.to_string());
     }
 
-    if !matches!(app.view, AppView::Learning) {
-        app.view = AppView::Menu;
+    match kind {
+        AiTaskKind::LearningLesson => {
+            if !matches!(app.view, AppView::Learning) {
+                app.view = AppView::Menu;
+            }
+        }
+        AiTaskKind::SessionDeepDive => {
+            if !matches!(app.view, AppView::DeepDive) {
+                app.view = AppView::Menu;
+            }
+        }
     }
 }
 
@@ -127,7 +168,7 @@ pub(crate) fn trigger_learning_response(app: &mut App) {
         return;
     }
 
-    let generator = match app.learning_generator.clone() {
+    let backend = match app.llm_backend.clone() {
         Some(generator) => generator,
         None => {
             let help = app.ai_provider.missing_key_help().to_string();
@@ -148,57 +189,61 @@ pub(crate) fn trigger_learning_response(app: &mut App) {
         return;
     }
 
-    let (sender, receiver) = mpsc::channel();
-    app.ai_result_receiver = Some(receiver);
-    app.ai_loading = true;
-    app.ai_loading_frame = 0;
-    app.ai_loading_start = Some(Instant::now());
-    app.ai_progress_percent = 0;
-    app.ai_progress_message = "Initializing...".to_string();
-    app.update_loading_status();
     app.view = AppView::Learning;
-    log_debug("App: displaying learning loading spinner");
-    log_debug(&format!(
-        "App: starting {} generation task",
-        app.ai_provider.label()
-    ));
-
+    start_ai_task(app, AiTaskKind::LearningLesson);
     let summary_override = app.summary_content.clone();
     let provider_label = app.ai_provider.label().to_string();
+    let sender = take_sender(app);
 
     thread::spawn(move || {
         log_debug(&format!(
-            "App: background {} generation task started",
+            "App: background {} learning generation task started",
             provider_label
         ));
-
-        send_progress(&sender, "Loading session summary...", 10);
+        send_progress(
+            &sender,
+            AiTaskKind::LearningLesson,
+            "Loading session summary...",
+            10,
+        );
 
         let runtime = match tokio::runtime::Runtime::new() {
             Ok(runtime) => runtime,
             Err(err) => {
-                let _ = sender.send(AiTaskMessage::Error(format!(
-                    "Failed to build Tokio runtime: {}",
-                    err
-                )));
+                let _ = sender.send(AiTaskMessage::Error(
+                    AiTaskKind::LearningLesson,
+                    format!("Failed to build Tokio runtime: {}", err),
+                ));
                 return;
             }
         };
 
-        send_progress(&sender, "Calling LLM via Rig...", 30);
-
-        let result = runtime.block_on(
-            generator.generate_learning_response_with_progress(summary_override, &sender),
+        send_progress(
+            &sender,
+            AiTaskKind::LearningLesson,
+            "Calling LLM via Rig...",
+            30,
         );
+
+        let result = runtime
+            .block_on(backend.generate_learning_response_with_progress(summary_override, &sender));
         drop(runtime);
 
         match result {
             Ok(structured) => {
-                send_progress(&sender, "Finalizing quiz...", 95);
-                let _ = sender.send(AiTaskMessage::Success(structured));
+                send_progress(
+                    &sender,
+                    AiTaskKind::LearningLesson,
+                    "Finalizing quiz...",
+                    95,
+                );
+                let _ = sender.send(AiTaskMessage::LearningSuccess(structured));
             }
             Err(err) => {
-                let _ = sender.send(AiTaskMessage::Error(err.to_string()));
+                let _ = sender.send(AiTaskMessage::Error(
+                    AiTaskKind::LearningLesson,
+                    err.to_string(),
+                ));
             }
         }
     });
@@ -211,7 +256,7 @@ pub(crate) fn trigger_learning_response_skip_sync(app: &mut App) {
         return;
     }
 
-    let generator = match app.learning_generator.clone() {
+    let backend = match app.llm_backend.clone() {
         Some(generator) => generator,
         None => {
             let help = app.ai_provider.missing_key_help().to_string();
@@ -230,68 +275,172 @@ pub(crate) fn trigger_learning_response_skip_sync(app: &mut App) {
         return;
     }
 
-    let (sender, receiver) = mpsc::channel();
-    app.ai_result_receiver = Some(receiver);
-    app.ai_loading = true;
-    app.ai_loading_frame = 0;
-    app.ai_loading_start = Some(Instant::now());
-    app.ai_progress_percent = 0;
-    app.ai_progress_message = "Initializing...".to_string();
-    app.update_loading_status();
     app.view = AppView::Learning;
-    log_debug("App: displaying learning loading spinner");
-    log_debug("App: starting learning generation task from selected session");
-
+    start_ai_task(app, AiTaskKind::LearningLesson);
     let summary_override = app.summary_content.clone();
     let provider_label = app.ai_provider.label().to_string();
+    let sender = take_sender(app);
 
     thread::spawn(move || {
         log_debug(&format!(
-            "App: background {} generation task started (from selected session)",
+            "App: background {} learning generation task started (from selected session)",
             provider_label
         ));
-
-        send_progress(&sender, "Loading session summary...", 10);
+        send_progress(
+            &sender,
+            AiTaskKind::LearningLesson,
+            "Loading session summary...",
+            10,
+        );
 
         let runtime = match tokio::runtime::Runtime::new() {
             Ok(runtime) => runtime,
             Err(err) => {
-                let _ = sender.send(AiTaskMessage::Error(format!(
-                    "Failed to build Tokio runtime: {}",
-                    err
-                )));
+                let _ = sender.send(AiTaskMessage::Error(
+                    AiTaskKind::LearningLesson,
+                    format!("Failed to build Tokio runtime: {}", err),
+                ));
                 return;
             }
         };
 
-        send_progress(&sender, "Calling LLM via Rig...", 30);
-
-        let result = runtime.block_on(
-            generator.generate_learning_response_with_progress(summary_override, &sender),
+        send_progress(
+            &sender,
+            AiTaskKind::LearningLesson,
+            "Calling LLM via Rig...",
+            30,
         );
+        let result = runtime
+            .block_on(backend.generate_learning_response_with_progress(summary_override, &sender));
         drop(runtime);
 
         match result {
             Ok(structured) => {
-                send_progress(&sender, "Finalizing quiz...", 95);
-                let _ = sender.send(AiTaskMessage::Success(structured));
+                send_progress(
+                    &sender,
+                    AiTaskKind::LearningLesson,
+                    "Finalizing quiz...",
+                    95,
+                );
+                let _ = sender.send(AiTaskMessage::LearningSuccess(structured));
             }
             Err(err) => {
-                let _ = sender.send(AiTaskMessage::Error(err.to_string()));
+                let _ = sender.send(AiTaskMessage::Error(
+                    AiTaskKind::LearningLesson,
+                    err.to_string(),
+                ));
             }
         }
     });
 }
 
-fn send_progress(sender: &Sender<AiTaskMessage>, message: &str, percent: u8) {
-    let _ = sender.send(AiTaskMessage::Progress(message.to_string(), percent));
+pub(crate) fn trigger_deep_dive_response_from_session(app: &mut App, session: Session) {
+    log_debug("App: generating deep dive from selected session");
+    if app.ai_loading {
+        log_debug("App: AI generation already in progress; ignoring duplicate request");
+        return;
+    }
+
+    let backend = match app.llm_backend.clone() {
+        Some(generator) => generator,
+        None => {
+            let help = app.ai_provider.missing_key_help().to_string();
+            App::push_error(&mut app.error, help.clone());
+            app.ai_status = Some(help);
+            log_debug("App: deep-dive backend unavailable; aborting generation");
+            return;
+        }
+    };
+
+    app.view = AppView::DeepDive;
+    start_ai_task(app, AiTaskKind::SessionDeepDive);
+    let sender = take_sender(app);
+    let session_source = app.session_source.clone();
+    let provider_label = app.ai_provider.label().to_string();
+
+    thread::spawn(move || {
+        log_debug(&format!(
+            "App: background {} deep-dive generation task started",
+            provider_label
+        ));
+        send_progress(
+            &sender,
+            AiTaskKind::SessionDeepDive,
+            "Preparing selected session...",
+            10,
+        );
+
+        let runtime = match tokio::runtime::Runtime::new() {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                let _ = sender.send(AiTaskMessage::Error(
+                    AiTaskKind::SessionDeepDive,
+                    format!("Failed to build Tokio runtime: {}", err),
+                ));
+                return;
+            }
+        };
+
+        let result = runtime.block_on(deep_dive::generate_deep_dive_with_progress(
+            &backend,
+            &session_source,
+            session,
+            &sender,
+        ));
+        drop(runtime);
+
+        match result {
+            Ok(result) => {
+                send_progress(
+                    &sender,
+                    AiTaskKind::SessionDeepDive,
+                    "Finalizing deep dive...",
+                    95,
+                );
+                let _ = sender.send(AiTaskMessage::DeepDiveSuccess(result));
+            }
+            Err(err) => {
+                let _ = sender.send(AiTaskMessage::Error(
+                    AiTaskKind::SessionDeepDive,
+                    err.to_string(),
+                ));
+            }
+        }
+    });
+}
+
+fn start_ai_task(app: &mut App, kind: AiTaskKind) {
+    let (sender, receiver) = mpsc::channel();
+    app.ai_result_receiver = Some(receiver);
+    app.ai_loading = true;
+    app.ai_task_kind = Some(kind);
+    app.ai_loading_frame = 0;
+    app.ai_loading_start = Some(Instant::now());
+    app.ai_progress_percent = 0;
+    app.ai_progress_message = "Initializing...".to_string();
+    app.update_loading_status();
+    app.ai_sender = Some(sender);
+}
+
+fn take_sender(app: &mut App) -> Sender<AiTaskMessage> {
+    app.ai_sender
+        .take()
+        .expect("AI sender should be available after start_ai_task")
+}
+
+fn send_progress(sender: &Sender<AiTaskMessage>, kind: AiTaskKind, message: &str, percent: u8) {
+    let _ = sender.send(AiTaskMessage::Progress(kind, message.to_string(), percent));
 }
 
 impl App {
     pub(crate) fn update_loading_status(&mut self) {
         if self.ai_loading {
             let frame = AI_LOADING_FRAMES[self.ai_loading_frame % AI_LOADING_FRAMES.len()];
-            self.ai_status = Some(format!("{} Generating learning response…", frame));
+            let label = match self.ai_task_kind.unwrap_or(AiTaskKind::LearningLesson) {
+                AiTaskKind::LearningLesson => "Generating learning response…",
+                AiTaskKind::SessionDeepDive => "Generating session deep dive…",
+            };
+            self.ai_status = Some(format!("{} {}", frame, label));
         }
     }
 }
@@ -338,31 +487,44 @@ pub(crate) fn poll_ai_messages(app: &mut App) {
         loop {
             match receiver.try_recv() {
                 Ok(message) => match message {
-                    AiTaskMessage::Success(response) => {
+                    AiTaskMessage::LearningSuccess(response) => {
                         app.ai_loading = false;
                         app.ai_loading_start = None;
+                        app.ai_task_kind = None;
                         clear_receiver = true;
-                        handle_ai_success(app, response);
+                        handle_learning_success(app, response);
                         break;
                     }
-                    AiTaskMessage::Error(message) => {
+                    AiTaskMessage::DeepDiveSuccess(response) => {
                         app.ai_loading = false;
                         app.ai_loading_start = None;
+                        app.ai_task_kind = None;
                         clear_receiver = true;
-                        handle_ai_error(app, message);
+                        handle_deep_dive_success(app, response);
                         break;
                     }
-                    AiTaskMessage::Progress(message, percent) => {
+                    AiTaskMessage::Error(kind, message) => {
+                        app.ai_loading = false;
+                        app.ai_loading_start = None;
+                        app.ai_task_kind = None;
+                        clear_receiver = true;
+                        handle_ai_error(app, kind, message);
+                        break;
+                    }
+                    AiTaskMessage::Progress(kind, message, percent) => {
+                        app.ai_task_kind = Some(kind);
                         app.ai_progress_message = message;
                         app.ai_progress_percent = percent;
                     }
                 },
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
+                    let kind = app.ai_task_kind.unwrap_or(AiTaskKind::LearningLesson);
                     app.ai_loading = false;
                     app.ai_loading_start = None;
+                    app.ai_task_kind = None;
                     clear_receiver = true;
-                    handle_ai_error(app, "Background AI worker disconnected".to_string());
+                    handle_ai_error(app, kind, "Background AI worker disconnected".to_string());
                     break;
                 }
             }
@@ -371,6 +533,7 @@ pub(crate) fn poll_ai_messages(app: &mut App) {
 
     if clear_receiver {
         app.ai_result_receiver = None;
+        app.ai_sender = None;
     }
 }
 
@@ -399,14 +562,18 @@ mod tests {
             summary_content: None,
             error: None,
             ai_provider: AiProvider::OpenAI,
-            learning_generator: None,
+            llm_backend: None,
             ai_status: None,
             ai_loading: false,
+            ai_task_kind: None,
             ai_loading_frame: 0,
             ai_loading_start: None,
             ai_progress_percent: 0,
             ai_progress_message: String::new(),
             ai_result_receiver: None,
+            ai_sender: None,
+            document_export_receiver: None,
+            document_export_loading: false,
             learning_response: None,
             learning_group_index: 0,
             learning_quiz_index: 0,
@@ -414,11 +581,11 @@ mod tests {
             learning_feedback: None,
             learning_summary_revealed: false,
             learning_waiting_for_next: false,
-            learning_selecting_session: false,
-            learning_selected_session: None,
+            session_selection_target: None,
+            session_picker_selected_session: None,
             projects: Vec::new(),
-            learning_selected_project: None,
-            learning_viewing_projects: true,
+            session_picker_selected_project: None,
+            session_picker_viewing_projects: true,
             config_form: ConfigForm::from_config(AppConfig::default()),
             write_output_artifacts: false,
             openai_model: OpenAiModelKind::Gpt5Mini,
@@ -433,6 +600,14 @@ mod tests {
             last_quiz_event_timestamp: None,
             learning_showing_summary: false,
             quiz_summary_results: Vec::new(),
+            deep_dive_document: None,
+            deep_dive_history_document: None,
+            deep_dive_scroll: 0,
+            deep_dive_history: Vec::new(),
+            deep_dive_history_selected: None,
+            deep_dive_showing_history: false,
+            library_artifacts: Vec::new(),
+            library_selected: None,
         }
     }
 
@@ -479,7 +654,7 @@ mod tests {
     #[test]
     fn handle_ai_success_sets_learning_state_and_status() {
         let mut app = test_app();
-        handle_ai_success(&mut app, sample_result());
+        handle_learning_success(&mut app, sample_result());
 
         assert_eq!(app.view, AppView::Learning);
         assert_eq!(app.learning_group_index, 0);
@@ -501,6 +676,7 @@ mod tests {
         app.view = AppView::Learning;
         handle_ai_error(
             &mut app,
+            AiTaskKind::LearningLesson,
             "Failed to build Tokio runtime: missing permissions".to_string(),
         );
 
@@ -510,7 +686,11 @@ mod tests {
         assert_eq!(app.view, AppView::Learning);
 
         let mut app = test_app();
-        handle_ai_error(&mut app, "network issue".to_string());
+        handle_ai_error(
+            &mut app,
+            AiTaskKind::LearningLesson,
+            "network issue".to_string(),
+        );
         let error = app.error.as_ref().unwrap();
         assert!(error.contains("AI generation failed: network issue"));
         assert_eq!(app.ai_status.as_deref(), Some("AI generation failed"));
@@ -539,7 +719,7 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         app.ai_result_receiver = Some(receiver);
         sender
-            .send(AiTaskMessage::Success(sample_result()))
+            .send(AiTaskMessage::LearningSuccess(sample_result()))
             .unwrap();
 
         poll_ai_messages(&mut app);
@@ -557,7 +737,10 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         app.ai_result_receiver = Some(receiver);
         sender
-            .send(AiTaskMessage::Error("failure".to_string()))
+            .send(AiTaskMessage::Error(
+                AiTaskKind::LearningLesson,
+                "failure".to_string(),
+            ))
             .unwrap();
 
         poll_ai_messages(&mut app);

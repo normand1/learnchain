@@ -1,15 +1,18 @@
 use super::{
     analytics_manager::AnalyticsManager, config_manager::ConfigManager,
     events_manager::EventsManager, learning_manager::LearningManager,
+    library_manager::LibraryManager, session_picker_manager::SessionPickerManager,
 };
-use crate::App;
+use crate::{App, SessionSelectionTarget};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-pub(crate) const MENU_OPTIONS: [&str; 4] = [
+pub(crate) const MENU_OPTIONS: [&str; 6] = [
     "1. Generate learning lesson",
-    "2. View analytics dashboard",
-    "3. View session events",
-    "4. Configure details",
+    "2. Generate session deep dive",
+    "3. View library",
+    "4. View analytics dashboard",
+    "5. View session events",
+    "6. Configure details",
 ];
 
 pub(crate) struct MenuManager<'a> {
@@ -40,6 +43,14 @@ impl<'a> MenuManager<'a> {
             }
             (KeyModifiers::NONE, KeyCode::Char('4')) => {
                 self.app.menu_index = 3;
+                self.activate_menu_option();
+            }
+            (KeyModifiers::NONE, KeyCode::Char('5')) => {
+                self.app.menu_index = 4;
+                self.activate_menu_option();
+            }
+            (KeyModifiers::NONE, KeyCode::Char('6')) => {
+                self.app.menu_index = 5;
                 self.activate_menu_option();
             }
             (KeyModifiers::NONE, KeyCode::Char('c') | KeyCode::Char('C')) => {
@@ -85,10 +96,12 @@ impl<'a> MenuManager<'a> {
 
     fn activate_menu_option(&mut self) {
         match self.app.menu_index {
-            0 => LearningManager::show_session_selection(self.app),
-            1 => AnalyticsManager::show_analytics(self.app),
-            2 => EventsManager::show_events(self.app),
-            3 => ConfigManager::new(self.app).show_config(),
+            0 => SessionPickerManager::show(self.app, SessionSelectionTarget::Quiz),
+            1 => SessionPickerManager::show(self.app, SessionSelectionTarget::DeepDive),
+            2 => LibraryManager::show_library(self.app),
+            3 => AnalyticsManager::show_analytics(self.app),
+            4 => EventsManager::show_events(self.app),
+            5 => ConfigManager::new(self.app).show_config(),
             _ => {}
         }
     }
