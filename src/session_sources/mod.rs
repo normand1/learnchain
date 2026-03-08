@@ -9,6 +9,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::session_analytics::{self, SessionAnalytics};
+
 #[derive(Debug)]
 pub struct SessionLoad {
     pub source: String,
@@ -41,9 +43,12 @@ impl SessionLoad {
 pub struct SessionEvent {
     pub timestamp: String,
     pub payload_type: String,
+    pub event_kind: SessionEventKind,
     pub call_id: Option<String>,
+    pub tool_name: Option<String>,
     pub arguments: Option<String>,
     pub output: Option<String>,
+    pub result_metadata: Option<ToolResultMetadata>,
     pub content_texts: Vec<String>,
 }
 
@@ -56,7 +61,28 @@ pub struct Session {
     pub summary: String,
     pub first_user_prompt: Option<String>,
     pub source_file: PathBuf,
+    pub source_label: String,
+    pub analytics: SessionAnalytics,
     pub events: Vec<SessionEvent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum SessionEventKind {
+    UserPrompt,
+    ToolCall,
+    ToolResult,
+    AgentReasoning,
+    Context,
+    Metric,
+    Message,
+    Unknown,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolResultMetadata {
+    pub exit_code: Option<i32>,
+    pub duration_seconds: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -184,7 +210,7 @@ pub trait SessionSource {
             if let Some(err) = parse_error {
                 append_error(&mut aggregated_error, err);
             }
-            let sessions = group_events_by_session(events, &file_path);
+            let sessions = group_events_by_session(events, &file_path, self.label());
             all_sessions.extend(sessions);
         }
 
@@ -221,14 +247,19 @@ pub(crate) fn append_error(slot: &mut Option<String>, message: String) {
     }
 }
 
-pub fn group_events_by_session(events: Vec<SessionEvent>, source_file: &Path) -> Vec<Session> {
-    group_events_by_session_with_metadata(events, source_file, None)
+pub fn group_events_by_session(
+    events: Vec<SessionEvent>,
+    source_file: &Path,
+    source_label: &str,
+) -> Vec<Session> {
+    group_events_by_session_with_metadata(events, source_file, None, source_label)
 }
 
 pub fn group_events_by_session_with_metadata(
     events: Vec<SessionEvent>,
     source_file: &Path,
     metadata: Option<&SessionFileMetadata>,
+    source_label: &str,
 ) -> Vec<Session> {
     let mut session_map: HashMap<String, Vec<SessionEvent>> = HashMap::new();
     let fallback_session_id = metadata
@@ -265,7 +296,7 @@ pub fn group_events_by_session_with_metadata(
             let date = derive_date_from_timestamp(&timestamp);
             let first_user_prompt = find_first_user_prompt(&events);
             let summary = derive_session_summary(&events, first_user_prompt.as_deref());
-            Session {
+            let mut session = Session {
                 id,
                 date,
                 timestamp,
@@ -275,8 +306,12 @@ pub fn group_events_by_session_with_metadata(
                 summary,
                 first_user_prompt,
                 source_file: source_file.to_path_buf(),
+                source_label: source_label.to_string(),
+                analytics: SessionAnalytics::default(),
                 events,
-            }
+            };
+            session.analytics = session_analytics::analyze(&session);
+            session
         })
         .collect();
 
@@ -289,7 +324,8 @@ fn find_first_user_prompt(events: &[SessionEvent]) -> Option<String> {
     for event in events {
         // Check for user_prompt type (from Claude Code initial messages)
         // or messages with "role: user" in content_texts
-        let is_user_message = event.payload_type == "user_prompt"
+        let is_user_message = event.event_kind == SessionEventKind::UserPrompt
+            || event.payload_type == "user_prompt"
             || event.content_texts.iter().any(|t| t == "role: user");
 
         if is_user_message {
@@ -345,7 +381,7 @@ fn derive_session_summary(events: &[SessionEvent], first_user_prompt: Option<&st
         if let Some(tool_name) = event.payload_type.strip_prefix("tool_use: ") {
             return format!("Started with {}", tool_name);
         }
-        if event.payload_type == "function_call" {
+        if event.event_kind == SessionEventKind::ToolCall || event.payload_type == "function_call" {
             // For Codex, try to extract command from arguments
             if let Some(args) = &event.arguments {
                 if let Some(cmd) = extract_command_from_args(args) {

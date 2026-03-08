@@ -173,6 +173,7 @@ pub(crate) async fn generate_deep_dive_with_progress(
         source_file: bundle.session.source_file.display().to_string(),
         referenced_url_count: bundle.external_urls.len(),
         reviewed_url_count: response.reviewed_sources.len(),
+        session_analytics: bundle.session.analytics.clone(),
     };
 
     let markdown =
@@ -269,6 +270,66 @@ pub(crate) fn render_deep_dive_markdown(
         markdown.push(format!("- Project: {}", metadata.project_name));
         markdown.push(format!("- Working directory: {}", metadata.project_cwd));
         markdown.push(format!("- Source file: {}", metadata.source_file));
+        markdown.push(String::new());
+    }
+    if !metadata.session_analytics.is_empty() {
+        markdown.push("## Session Analytics".to_string());
+        markdown.push(format!(
+            "- Tool calls: {} / {} successful",
+            metadata.session_analytics.successful_tool_calls,
+            metadata.session_analytics.total_tool_calls
+        ));
+        markdown.push(format!(
+            "- Failed/problematic calls: {}",
+            metadata.session_analytics.failed_tool_calls
+        ));
+        markdown.push(format!(
+            "- Unknown outcome calls: {}",
+            metadata.session_analytics.unknown_outcome_tool_calls
+        ));
+        markdown.push(format!(
+            "- MCP calls: {}",
+            metadata.session_analytics.mcp_tool_calls
+        ));
+        markdown.push(format!(
+            "- External lookups: {}",
+            metadata.session_analytics.external_lookup_calls
+        ));
+        markdown.push(format!(
+            "- Adjustments: {}",
+            metadata.session_analytics.adjust_course_count
+        ));
+        markdown.push(String::new());
+
+        markdown.push("### External Resources".to_string());
+        if metadata.session_analytics.external_resources.is_empty() {
+            markdown.push("- None".to_string());
+        } else {
+            for resource in &metadata.session_analytics.external_resources {
+                markdown.push(format!("- {} x{}", resource.label, resource.count));
+            }
+        }
+        markdown.push(String::new());
+
+        markdown.push("### Adjustments Detected".to_string());
+        if metadata.session_analytics.adjustments.is_empty() {
+            markdown.push("- None".to_string());
+        } else {
+            for adjustment in &metadata.session_analytics.adjustments {
+                let description = match adjustment.kind {
+                    crate::session_analytics::AdjustmentKind::PostFailurePivot => {
+                        "pivot after failure"
+                    }
+                    crate::session_analytics::AdjustmentKind::RetryWithDifferentArguments => {
+                        "changed args after failure"
+                    }
+                };
+                markdown.push(format!(
+                    "- {} -> {} ({})",
+                    adjustment.from_tool_name, adjustment.to_tool_name, description
+                ));
+            }
+        }
         markdown.push(String::new());
     }
     if sections.goal {
@@ -830,6 +891,11 @@ mod tests {
     use super::*;
     use crate::config::{AiProvider, ResolvedLlmConfig};
     use crate::llm::DeepDiveArtifactMetadata;
+    use crate::session_analytics::{
+        AdjustmentKind, AdjustmentMarker, ExternalResourceKind, ExternalResourceRef,
+        SessionAnalytics,
+    };
+    use crate::session_sources::SessionEventKind;
     use std::path::PathBuf;
 
     fn sample_session() -> Session {
@@ -843,15 +909,20 @@ mod tests {
                 "Use docs at https://docs.rs/reqwest and https://ratatui.rs".to_string(),
             ),
             source_file: PathBuf::from("/tmp/session.jsonl"),
+            source_label: "Codex CLI".to_string(),
+            analytics: SessionAnalytics::default(),
             events: vec![
                 SessionEvent {
                     timestamp: "2026-03-06T12:00:00Z".to_string(),
                     payload_type: "message".to_string(),
+                    event_kind: SessionEventKind::Message,
                     call_id: None,
+                    tool_name: None,
                     arguments: Some(
                         "{\"url\":\"https://docs.rs/reqwest/latest/reqwest/\"}".to_string(),
                     ),
                     output: Some("See https://github.com/0xPlaygrounds/rig".to_string()),
+                    result_metadata: None,
                     content_texts: vec![
                         "Read https://ratatui.rs/examples/".to_string(),
                         "cwd: /workspace/learnchain".to_string(),
@@ -860,9 +931,12 @@ mod tests {
                 SessionEvent {
                     timestamp: "2026-03-06T12:05:00Z".to_string(),
                     payload_type: "function_call".to_string(),
+                    event_kind: SessionEventKind::ToolCall,
                     call_id: None,
+                    tool_name: Some("shell".to_string()),
                     arguments: None,
                     output: Some("Done".to_string()),
+                    result_metadata: None,
                     content_texts: vec!["Updated output manager".to_string()],
                 },
             ],
@@ -885,9 +959,12 @@ mod tests {
             events.push(SessionEvent {
                 timestamp: format!("{}", index),
                 payload_type: "message".to_string(),
+                event_kind: SessionEventKind::Message,
                 call_id: None,
+                tool_name: None,
                 arguments: None,
                 output: None,
+                result_metadata: None,
                 content_texts: vec![format!("event {}", index)],
             });
         }
@@ -912,6 +989,26 @@ mod tests {
             source_file: "/tmp/session.jsonl".to_string(),
             referenced_url_count: 2,
             reviewed_url_count: 1,
+            session_analytics: SessionAnalytics {
+                total_tool_calls: 4,
+                successful_tool_calls: 3,
+                failed_tool_calls: 1,
+                unknown_outcome_tool_calls: 0,
+                mcp_tool_calls: 1,
+                external_lookup_calls: 2,
+                adjust_course_count: 1,
+                external_resources: vec![ExternalResourceRef {
+                    kind: ExternalResourceKind::Web,
+                    tool_name: "web.search_query".to_string(),
+                    label: "rust iterators".to_string(),
+                    count: 2,
+                }],
+                adjustments: vec![AdjustmentMarker {
+                    kind: AdjustmentKind::PostFailurePivot,
+                    from_tool_name: "shell".to_string(),
+                    to_tool_name: "web.search_query".to_string(),
+                }],
+            },
         };
         let response = StructuredDeepDiveResponse {
             title: "Deep Dive".to_string(),
@@ -940,11 +1037,19 @@ mod tests {
         let narrative = markdown.find("## Teaching Narrative").unwrap();
         let reviewed = markdown.find("## Reviewed External Sources").unwrap();
         let urls = markdown.find("## Referenced URLs").unwrap();
+        let analytics = markdown.find("## Session Analytics").unwrap();
+        let resources = markdown.find("### External Resources").unwrap();
+        let adjustments = markdown.find("### Adjustments Detected").unwrap();
+        assert!(analytics < goal);
+        assert!(resources < goal);
+        assert!(adjustments < goal);
         assert!(goal < accomplished);
         assert!(accomplished < learnings);
         assert!(learnings < narrative);
         assert!(narrative < reviewed);
         assert!(reviewed < urls);
+        assert!(markdown.contains("- Tool calls: 3 / 4 successful"));
+        assert!(markdown.contains("- rust iterators x2"));
     }
 
     #[test]
@@ -962,6 +1067,7 @@ mod tests {
             source_file: "/tmp/session.jsonl".to_string(),
             referenced_url_count: 2,
             reviewed_url_count: 1,
+            session_analytics: SessionAnalytics::default(),
         };
         let response = StructuredDeepDiveResponse {
             title: "Deep Dive".to_string(),
@@ -1007,9 +1113,12 @@ mod tests {
         let event = SessionEvent {
             timestamp: "2026-03-06T12:00:00Z".to_string(),
             payload_type: "message".to_string(),
+            event_kind: SessionEventKind::Message,
             call_id: None,
+            tool_name: None,
             arguments: Some(String::new()),
             output: None,
+            result_metadata: None,
             content_texts: vec!["First change".to_string(), "  ".to_string()],
         };
 
@@ -1028,9 +1137,12 @@ mod tests {
         session.events.push(SessionEvent {
             timestamp: "2026-03-06T12:10:00Z".to_string(),
             payload_type: "message".to_string(),
+            event_kind: SessionEventKind::Message,
             call_id: None,
+            tool_name: None,
             arguments: None,
             output: Some("Added timeout fallback".to_string()),
+            result_metadata: None,
             content_texts: vec!["Updated Codex CLI defaults".to_string()],
         });
 

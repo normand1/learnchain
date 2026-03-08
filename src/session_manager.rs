@@ -194,8 +194,8 @@ mod tests {
         let log_path = day_dir.join("session.jsonl");
 
         let initial_lines = [
-            r#"{"timestamp":"2025-10-05T10:00:00Z","payload":{"type":"function_call","call_id":"call-1","arguments":{"cmd":"ls"}}}"#,
-            r#"{"timestamp":"2025-10-05T10:05:00Z","payload":{"type":"function_call_output","call_id":"call-1","output":{"stdout":"done"}}}"#,
+            r#"{"timestamp":"2025-10-05T10:00:00Z","type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"call-1","arguments":{"command":"ls"}}}"#,
+            r#"{"timestamp":"2025-10-05T10:05:00Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":{"output":"done","metadata":{"exit_code":0}}}}"#,
         ];
         let mut file = File::create(&log_path).unwrap();
         for line in &initial_lines {
@@ -229,7 +229,7 @@ mod tests {
         writeln!(
             append_file,
             "{}",
-            r#"{"timestamp":"2025-10-05T10:10:00Z","payload":{"type":"function_call","call_id":"call-2","arguments":{"cmd":"pwd"}}}"#
+            r#"{"timestamp":"2025-10-05T10:10:00Z","type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"call-2","arguments":{"command":"pwd"}}}"#
         )
         .unwrap();
         drop(append_file);

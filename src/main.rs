@@ -5,6 +5,7 @@ mod llm;
 mod log_util;
 mod markdown_rules;
 mod output_manager;
+mod session_analytics;
 mod session_manager;
 mod session_sources;
 mod ui_renderer;

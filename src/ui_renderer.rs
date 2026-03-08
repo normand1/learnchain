@@ -560,6 +560,88 @@ impl<'a> UiRenderer<'a> {
         ])
     }
 
+    fn session_details_text(session: &Session) -> String {
+        let mut details = vec![
+            format!("Session ID: {}", session.id),
+            format!("Date: {}", session.date),
+            format!("Events: {}", session.events.len()),
+            format!("Session Source: {}", session.source_label),
+        ];
+
+        if let Some(first_event) = session.events.first() {
+            for text in &first_event.content_texts {
+                if text.starts_with("branch: ") || text.starts_with("cwd: ") {
+                    details.push(text.clone());
+                }
+            }
+        }
+
+        details.push(String::new());
+        details.push(format!("Source File: {}", session.source_file.display()));
+        details.push(String::new());
+        details.push("─── Session Analytics ───".to_string());
+        details.push(format!(
+            "Tool calls: {} / {} successful",
+            session.analytics.successful_tool_calls, session.analytics.total_tool_calls
+        ));
+        details.push(format!(
+            "Failed/problematic calls: {}",
+            session.analytics.failed_tool_calls
+        ));
+        details.push(format!(
+            "Unknown outcome calls: {}",
+            session.analytics.unknown_outcome_tool_calls
+        ));
+        details.push(format!("MCP calls: {}", session.analytics.mcp_tool_calls));
+        details.push(format!(
+            "External lookups: {}",
+            session.analytics.external_lookup_calls
+        ));
+        details.push(format!(
+            "Adjustments: {}",
+            session.analytics.adjust_course_count
+        ));
+
+        details.push(String::new());
+        details.push("External resources".to_string());
+        if session.analytics.external_resources.is_empty() {
+            details.push("- None".to_string());
+        } else {
+            for resource in &session.analytics.external_resources {
+                details.push(format!("- {} x{}", resource.label, resource.count));
+            }
+        }
+
+        details.push(String::new());
+        details.push("Adjustments detected".to_string());
+        if session.analytics.adjustments.is_empty() {
+            details.push("- None".to_string());
+        } else {
+            for adjustment in &session.analytics.adjustments {
+                let description = match adjustment.kind {
+                    crate::session_analytics::AdjustmentKind::PostFailurePivot => {
+                        "pivot after failure"
+                    }
+                    crate::session_analytics::AdjustmentKind::RetryWithDifferentArguments => {
+                        "changed args after failure"
+                    }
+                };
+                details.push(format!(
+                    "- {} -> {} ({})",
+                    adjustment.from_tool_name, adjustment.to_tool_name, description
+                ));
+            }
+        }
+
+        if let Some(ref prompt) = session.first_user_prompt {
+            details.push(String::new());
+            details.push("─── First User Prompt ───".to_string());
+            details.push(prompt.clone());
+        }
+
+        details.join("\n")
+    }
+
     fn ratio_line(label: &str, numerator: u32, denominator: u32, percentage: f64) -> Line<'static> {
         let bar = Self::ratio_bar(numerator, denominator, 12);
         Line::from(vec![
@@ -707,37 +789,7 @@ impl<'a> UiRenderer<'a> {
         );
 
         let detail_text = match app.selected_session.and_then(|idx| app.sessions.get(idx)) {
-            Some(session) => {
-                let mut details = vec![
-                    format!("Session ID: {}", session.id),
-                    format!("Date: {}", session.date),
-                    format!("Events: {}", session.events.len()),
-                ];
-
-                // Extract branch and cwd from first event if available
-                if let Some(first_event) = session.events.first() {
-                    for text in &first_event.content_texts {
-                        if text.starts_with("branch: ") {
-                            details.push(text.clone());
-                        }
-                        if text.starts_with("cwd: ") {
-                            details.push(text.clone());
-                        }
-                    }
-                }
-
-                details.push(String::new());
-                details.push(format!("Source: {}", session.source_file.display()));
-
-                // Show full user prompt if available
-                if let Some(ref prompt) = session.first_user_prompt {
-                    details.push(String::new());
-                    details.push("─── First User Prompt ───".to_string());
-                    details.push(prompt.clone());
-                }
-
-                details.join("\n")
-            }
+            Some(session) => Self::session_details_text(session),
             None => "Select a session to view its details.".to_string(),
         };
 
@@ -2678,7 +2730,16 @@ fn strip_leading_toml_front_matter(markdown: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_leading_toml_front_matter;
+    use std::path::PathBuf;
+
+    use super::{UiRenderer, strip_leading_toml_front_matter};
+    use crate::{
+        session_analytics::{
+            AdjustmentKind, AdjustmentMarker, ExternalResourceKind, ExternalResourceRef,
+            SessionAnalytics,
+        },
+        session_sources::{Session, SessionEvent, SessionEventKind},
+    };
 
     #[test]
     fn strip_leading_toml_front_matter_removes_delimited_header() {
@@ -2696,5 +2757,61 @@ mod tests {
         let stripped = strip_leading_toml_front_matter(markdown);
 
         assert_eq!(stripped, markdown);
+    }
+
+    #[test]
+    fn session_details_text_includes_session_analytics_section() {
+        let session = Session {
+            id: "session-1".to_string(),
+            date: "2026-03-08".to_string(),
+            timestamp: "2026-03-08T12:00:00Z".to_string(),
+            cwd: "/workspace/learnchain".to_string(),
+            summary: "summary".to_string(),
+            first_user_prompt: Some("Investigate failing build".to_string()),
+            source_file: PathBuf::from("/tmp/session.jsonl"),
+            source_label: "Codex CLI".to_string(),
+            analytics: SessionAnalytics {
+                total_tool_calls: 4,
+                successful_tool_calls: 2,
+                failed_tool_calls: 1,
+                unknown_outcome_tool_calls: 1,
+                mcp_tool_calls: 1,
+                external_lookup_calls: 2,
+                adjust_course_count: 1,
+                external_resources: vec![ExternalResourceRef {
+                    kind: ExternalResourceKind::Web,
+                    tool_name: "web.search_query".to_string(),
+                    label: "rust iterators".to_string(),
+                    count: 2,
+                }],
+                adjustments: vec![AdjustmentMarker {
+                    kind: AdjustmentKind::PostFailurePivot,
+                    from_tool_name: "shell".to_string(),
+                    to_tool_name: "web.search_query".to_string(),
+                }],
+            },
+            events: vec![SessionEvent {
+                timestamp: "2026-03-08T12:00:00Z".to_string(),
+                payload_type: "function_call".to_string(),
+                event_kind: SessionEventKind::ToolCall,
+                call_id: Some("call-1".to_string()),
+                tool_name: Some("shell".to_string()),
+                arguments: None,
+                output: None,
+                result_metadata: None,
+                content_texts: vec![
+                    "branch: main".to_string(),
+                    "cwd: /workspace/learnchain".to_string(),
+                ],
+            }],
+        };
+
+        let detail_text = UiRenderer::session_details_text(&session);
+
+        assert!(detail_text.contains("─── Session Analytics ───"));
+        assert!(detail_text.contains("Tool calls: 2 / 4 successful"));
+        assert!(detail_text.contains("MCP calls: 1"));
+        assert!(detail_text.contains("- rust iterators x2"));
+        assert!(detail_text.contains("- shell -> web.search_query (pivot after failure)"));
     }
 }

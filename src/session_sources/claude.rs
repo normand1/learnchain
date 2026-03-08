@@ -1,4 +1,4 @@
-use super::{SessionEvent, SessionSource, append_error};
+use super::{SessionEvent, SessionEventKind, SessionSource, append_error};
 use chrono::{DateTime, Local};
 use serde::Deserialize;
 use serde_json::Value;
@@ -252,9 +252,12 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> (Vec<SessionEvent>, Opti
                                 events.push(SessionEvent {
                                     timestamp: timestamp.clone(),
                                     payload_type: "user_prompt".to_string(),
+                                    event_kind: SessionEventKind::UserPrompt,
                                     call_id: base_call_id,
+                                    tool_name: None,
                                     arguments: None,
                                     output: None,
+                                    result_metadata: None,
                                     content_texts,
                                 });
                             }
@@ -300,9 +303,12 @@ pub(crate) fn parse_claude_session_file(path: &Path) -> (Vec<SessionEvent>, Opti
                                 events.push(SessionEvent {
                                     timestamp: timestamp.clone(),
                                     payload_type,
+                                    event_kind: SessionEventKind::Message,
                                     call_id,
+                                    tool_name: content.name.clone(),
                                     arguments,
                                     output: None,
+                                    result_metadata: None,
                                     content_texts,
                                 });
                             }

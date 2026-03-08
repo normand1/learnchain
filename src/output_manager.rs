@@ -426,6 +426,7 @@ fn fallback_deep_dive_metadata(
         source_file: String::new(),
         referenced_url_count: 0,
         reviewed_url_count: 0,
+        session_analytics: Default::default(),
     }
 }
 
@@ -488,6 +489,11 @@ fn sanitize_filename(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_analytics::{
+        AdjustmentKind, AdjustmentMarker, ExternalResourceKind, ExternalResourceRef,
+        SessionAnalytics,
+    };
+    use std::time::SystemTime;
 
     #[test]
     fn sanitize_filename_replaces_special_characters() {
@@ -496,5 +502,62 @@ mod tests {
             "2026-03-06T10-00-00Z"
         );
         assert_eq!(sanitize_filename(""), "artifact");
+    }
+
+    #[test]
+    fn deep_dive_front_matter_round_trips_session_analytics() {
+        let mut temp_dir = std::env::temp_dir();
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        temp_dir.push(format!("learnchain-output-manager-{unique}"));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let manager = OutputManager::with_root(temp_dir.clone());
+        let metadata = DeepDiveArtifactMetadata {
+            artifact_type: "session_deep_dive".to_string(),
+            title: "Deep Dive".to_string(),
+            generated_at: "2026-03-08T12:00:00Z".to_string(),
+            session_source: "Codex CLI".to_string(),
+            session_id: "session-123".to_string(),
+            session_timestamp: "2026-03-08T12:00:00Z".to_string(),
+            session_date: "2026-03-08".to_string(),
+            project_name: "learnchain".to_string(),
+            project_cwd: "/workspace/learnchain".to_string(),
+            source_file: "/tmp/session.jsonl".to_string(),
+            referenced_url_count: 2,
+            reviewed_url_count: 1,
+            session_analytics: SessionAnalytics {
+                total_tool_calls: 4,
+                successful_tool_calls: 2,
+                failed_tool_calls: 1,
+                unknown_outcome_tool_calls: 1,
+                mcp_tool_calls: 1,
+                external_lookup_calls: 2,
+                adjust_course_count: 1,
+                external_resources: vec![ExternalResourceRef {
+                    kind: ExternalResourceKind::Web,
+                    tool_name: "web.search_query".to_string(),
+                    label: "rust iterators".to_string(),
+                    count: 2,
+                }],
+                adjustments: vec![AdjustmentMarker {
+                    kind: AdjustmentKind::PostFailurePivot,
+                    from_tool_name: "shell".to_string(),
+                    to_tool_name: "web.search_query".to_string(),
+                }],
+            },
+        };
+
+        let written = manager
+            .write_deep_dive_markdown(&metadata, "# Deep Dive\n\nBody")
+            .unwrap();
+        let read = manager.read_deep_dive_markdown(&written.path).unwrap();
+
+        assert_eq!(read.metadata.session_analytics.total_tool_calls, 4);
+        assert_eq!(read.metadata.session_analytics.mcp_tool_calls, 1);
+        assert_eq!(read.metadata.session_analytics.external_resources.len(), 1);
+        assert_eq!(read.metadata.session_analytics.adjustments.len(), 1);
     }
 }

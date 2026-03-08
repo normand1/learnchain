@@ -1,4 +1,7 @@
-use crate::{config, session_sources::SessionEvent};
+use crate::{
+    config,
+    session_sources::{SessionEvent, SessionEventKind},
+};
 
 const EXECUTION_ERROR_PREFIX: &str = "execution error:";
 const OPERATION_NOT_PERMITTED_PHRASE: &str = "operation not permitted";
@@ -81,8 +84,7 @@ impl MarkdownRules {
 }
 
 fn should_include_event(event: &SessionEvent) -> bool {
-    !includes_execution_error(event)
-        && !includes_operation_not_permitted(event)
+    !includes_problematic_tool_result(event)
         && (has_content_texts(event)
             || has_non_blank(event.arguments.as_deref())
             || has_non_blank(event.output.as_deref()))
@@ -114,6 +116,10 @@ fn includes_operation_not_permitted(event: &SessionEvent) -> bool {
             .arguments
             .as_deref()
             .map_or(false, contains_operation_not_permitted)
+}
+
+pub(crate) fn includes_problematic_tool_result(event: &SessionEvent) -> bool {
+    includes_execution_error(event) || includes_operation_not_permitted(event)
 }
 
 fn contains_operation_not_permitted(value: &str) -> bool {
@@ -197,9 +203,12 @@ mod tests {
         SessionEvent {
             timestamp: label.to_string(),
             payload_type: "call".to_string(),
+            event_kind: SessionEventKind::Unknown,
             call_id: Some(format!("call-{label}")),
+            tool_name: None,
             arguments: None,
             output: None,
+            result_metadata: None,
             content_texts: vec![format!("content-{label}")],
         }
     }

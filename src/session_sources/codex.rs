@@ -1,6 +1,7 @@
 use super::{
-    MultiSessionLoad, Session, SessionEvent, SessionFileMetadata, SessionLoad, SessionSource,
-    append_error, group_events_by_session_with_metadata, merge_errors,
+    MultiSessionLoad, Session, SessionEvent, SessionEventKind, SessionFileMetadata, SessionLoad,
+    SessionSource, ToolResultMetadata, append_error, group_events_by_session_with_metadata,
+    merge_errors,
 };
 use chrono::{DateTime, Local};
 use serde::Deserialize;
@@ -85,8 +86,12 @@ impl CodexCliSource {
             timestamp: metadata.timestamp,
             cwd: metadata.cwd,
         };
-        let sessions =
-            group_events_by_session_with_metadata(parsed.events, path, Some(&session_metadata));
+        let sessions = group_events_by_session_with_metadata(
+            parsed.events,
+            path,
+            Some(&session_metadata),
+            self.label(),
+        );
         sessions
             .into_iter()
             .next()
@@ -222,8 +227,12 @@ impl SessionSource for CodexCliSource {
                     timestamp: metadata.timestamp.clone(),
                     cwd: metadata.cwd.clone(),
                 });
-            let sessions =
-                group_events_by_session_with_metadata(parsed.events, &file_path, metadata.as_ref());
+            let sessions = group_events_by_session_with_metadata(
+                parsed.events,
+                &file_path,
+                metadata.as_ref(),
+                self.label(),
+            );
             all_sessions.extend(sessions);
         }
 
@@ -483,39 +492,8 @@ pub(crate) fn parse_codex_session_file_with_metadata(path: &Path) -> ParsedCodex
                             continue;
                         }
 
-                        if let Some(payload) = raw
-                            .payload
-                            .and_then(|payload| serde_json::from_value::<RawPayload>(payload).ok())
-                        {
-                            let RawPayload {
-                                payload_type,
-                                call_id,
-                                output,
-                                arguments,
-                                content,
-                            } = payload;
-                            if let Some(payload_type) = payload_type
-                                && is_relevant_payload_type(payload_type.as_str())
-                            {
-                                let timestamp =
-                                    raw.timestamp.unwrap_or_else(|| "<unknown>".to_string());
-                                let formatted_output = output.map(SessionEvent::format_value);
-                                let formatted_arguments = arguments.map(SessionEvent::format_value);
-                                let content_texts = content
-                                    .unwrap_or_default()
-                                    .into_iter()
-                                    .filter_map(|fragment| fragment.text)
-                                    .collect();
-
-                                events.push(SessionEvent {
-                                    timestamp,
-                                    payload_type,
-                                    call_id,
-                                    arguments: formatted_arguments,
-                                    output: formatted_output,
-                                    content_texts,
-                                });
-                            }
+                        if let Some(event) = parse_codex_event(raw) {
+                            events.push(event);
                         }
                     }
                     Err(err) => issues.push(format!("{}:#{}: {}", path.display(), idx + 1, err)),
@@ -585,8 +563,84 @@ fn read_codex_session_file_metadata(
     Ok(None)
 }
 
-fn is_relevant_payload_type(payload_type: &str) -> bool {
-    matches!(payload_type, "function_call" | "function_call_output")
+fn parse_codex_event(raw: RawEventEnvelope) -> Option<SessionEvent> {
+    let timestamp = raw.timestamp.unwrap_or_else(|| "<unknown>".to_string());
+    match raw.event_type.as_deref() {
+        Some("response_item") => parse_response_item_event(timestamp, raw.payload?),
+        Some("event_msg") => parse_event_message(timestamp, raw.payload?),
+        _ => None,
+    }
+}
+
+fn parse_response_item_event(timestamp: String, payload: Value) -> Option<SessionEvent> {
+    let item = serde_json::from_value::<RawResponseItem>(payload).ok()?;
+    match item.payload_type.as_deref()? {
+        "function_call" => Some(SessionEvent {
+            timestamp,
+            payload_type: "function_call".to_string(),
+            event_kind: SessionEventKind::ToolCall,
+            call_id: item.call_id,
+            tool_name: item.name,
+            arguments: item.arguments.map(SessionEvent::format_value),
+            output: None,
+            result_metadata: None,
+            content_texts: Vec::new(),
+        }),
+        "function_call_output" => {
+            let raw_output = item.output?;
+            let result_metadata = extract_tool_result_metadata(&raw_output);
+            Some(SessionEvent {
+                timestamp,
+                payload_type: "function_call_output".to_string(),
+                event_kind: SessionEventKind::ToolResult,
+                call_id: item.call_id,
+                tool_name: None,
+                arguments: None,
+                output: Some(SessionEvent::format_value(raw_output)),
+                result_metadata,
+                content_texts: Vec::new(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn parse_event_message(timestamp: String, payload: Value) -> Option<SessionEvent> {
+    let message = serde_json::from_value::<RawEventMessage>(payload).ok()?;
+    match message.payload_type.as_deref()? {
+        "agent_reasoning" => Some(SessionEvent {
+            timestamp,
+            payload_type: "agent_reasoning".to_string(),
+            event_kind: SessionEventKind::AgentReasoning,
+            call_id: None,
+            tool_name: None,
+            arguments: None,
+            output: None,
+            result_metadata: None,
+            content_texts: vec![message.text?],
+        }),
+        _ => None,
+    }
+}
+
+fn extract_tool_result_metadata(output: &Value) -> Option<ToolResultMetadata> {
+    let value = match output {
+        Value::Object(map) => Value::Object(map.clone()),
+        Value::String(raw) => serde_json::from_str::<Value>(raw).ok()?,
+        _ => return None,
+    };
+
+    Some(ToolResultMetadata {
+        exit_code: value
+            .get("metadata")
+            .and_then(|metadata| metadata.get("exit_code"))
+            .and_then(|value| value.as_i64())
+            .map(|value| value as i32),
+        duration_seconds: value
+            .get("metadata")
+            .and_then(|metadata| metadata.get("duration_seconds"))
+            .and_then(|value| value.as_f64()),
+    })
 }
 
 fn is_codex_session_log_file(path: &Path, metadata: &Metadata) -> bool {
@@ -633,17 +687,19 @@ struct RawEventEnvelope {
 }
 
 #[derive(Debug, Deserialize)]
-struct RawPayload {
+struct RawResponseItem {
     #[serde(rename = "type")]
     payload_type: Option<String>,
+    name: Option<String>,
     call_id: Option<String>,
     output: Option<Value>,
     arguments: Option<Value>,
-    content: Option<Vec<ContentFragment>>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ContentFragment {
+struct RawEventMessage {
+    #[serde(rename = "type")]
+    payload_type: Option<String>,
     text: Option<String>,
 }
 
@@ -669,10 +725,14 @@ mod tests {
         let (events, error) = parse_codex_session_file(&path);
 
         assert!(error.is_none(), "unexpected parse error: {:?}", error);
-        assert_eq!(events.len(), 12, "expected function call entries");
+        assert_eq!(events.len(), 19, "expected tool and reasoning entries");
 
-        let first = &events[0];
+        let first = events
+            .iter()
+            .find(|event| event.event_kind == SessionEventKind::ToolCall)
+            .expect("expected function call event");
         assert_eq!(first.payload_type, "function_call");
+        assert_eq!(first.tool_name.as_deref(), Some("shell"));
         assert_eq!(
             first.call_id.as_deref(),
             Some("call_o6cPedcTIBUW6VtobSubFUQS")
@@ -684,15 +744,46 @@ mod tests {
         assert!(arguments.contains("\"command\""));
         assert!(arguments.contains("\"ls\""));
 
-        let second = &events[1];
+        let second = events
+            .iter()
+            .find(|event| event.event_kind == SessionEventKind::ToolResult)
+            .expect("expected function call output");
         assert_eq!(second.payload_type, "function_call_output");
         assert_eq!(
             second.call_id.as_deref(),
             Some("call_o6cPedcTIBUW6VtobSubFUQS")
         );
+        assert_eq!(
+            second
+                .result_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.exit_code),
+            Some(0)
+        );
+        assert_eq!(
+            second
+                .result_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.duration_seconds),
+            Some(0.3)
+        );
         let output = second.output.as_deref().expect("output should be present");
         assert!(output.contains("AGENTS.md"));
         assert!(output.contains("Cargo.toml"));
+    }
+
+    #[test]
+    fn parse_codex_fixture_extracts_agent_reasoning() {
+        let path = fixture_path("test_fixtures/codex_events_sample.jsonl");
+        let (events, error) = parse_codex_session_file(&path);
+
+        assert!(error.is_none(), "unexpected parse error: {:?}", error);
+        let reasoning = events
+            .iter()
+            .find(|event| event.event_kind == SessionEventKind::AgentReasoning)
+            .expect("expected reasoning event");
+        assert_eq!(reasoning.payload_type, "agent_reasoning");
+        assert!(reasoning.content_texts[0].contains("Preparing to create AGENTS.md file"));
     }
 
     #[test]
@@ -724,8 +815,12 @@ mod tests {
                 cwd: metadata.cwd.clone(),
             });
 
-        let sessions =
-            group_events_by_session_with_metadata(parsed.events, &path, metadata.as_ref());
+        let sessions = group_events_by_session_with_metadata(
+            parsed.events,
+            &path,
+            metadata.as_ref(),
+            "Codex CLI",
+        );
         assert!(!sessions.is_empty(), "expected at least one session");
 
         let session = &sessions[0];

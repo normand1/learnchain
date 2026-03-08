@@ -5,6 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::types::LlmUsage;
+use crate::session_analytics::SessionAnalytics;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -29,6 +30,7 @@ pub struct DeepDiveArtifactMetadata {
     pub source_file: String,
     pub referenced_url_count: usize,
     pub reviewed_url_count: usize,
+    pub session_analytics: SessionAnalytics,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
