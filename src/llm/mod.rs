@@ -356,6 +356,7 @@ pub(crate) fn trigger_deep_dive_response_from_session(app: &mut App, session: Se
     let sender = take_sender(app);
     let session_source = app.session_source.clone();
     let provider_label = app.ai_provider.label().to_string();
+    let deep_dive_sections = app.config_form.deep_dive_sections.clone();
 
     thread::spawn(move || {
         log_debug(&format!(
@@ -384,6 +385,7 @@ pub(crate) fn trigger_deep_dive_response_from_session(app: &mut App, session: Se
             &backend,
             &session_source,
             session,
+            deep_dive_sections,
             &sender,
         ));
         drop(runtime);

@@ -9,8 +9,11 @@ use color_eyre::eyre::{Result, eyre};
 use regex::Regex;
 use reqwest::{Client, Url, redirect::Policy};
 
+use super::backend::LlmRequestOptions;
 use crate::{
     AiTaskKind, AiTaskMessage, Project,
+    config::AiProvider,
+    config::DeepDiveSectionsConfig,
     llm::{
         DeepDiveArtifactMetadata, DeepDiveGenerationResult, DeepDiveResearchPlan,
         DeepDiveReviewedSource, LlmBackend, StructuredDeepDiveResponse,
@@ -20,10 +23,18 @@ use crate::{
     session_sources::{Session, SessionEvent},
 };
 
-const MAX_DEEP_DIVE_EVENTS: usize = 40;
+const MAX_DEEP_DIVE_EVENTS: usize = 24;
 const MAX_REVIEW_URLS: usize = 5;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_FETCH_BYTES: usize = 150 * 1024;
+const MAX_FIRST_PROMPT_CHARS: usize = 600;
+const MAX_PLAN_EVENT_TEXT_CHARS: usize = 180;
+const MAX_PLAN_ARGUMENT_CHARS: usize = 120;
+const MAX_PLAN_OUTPUT_CHARS: usize = 120;
+const MAX_FETCHED_SOURCE_CHARS: usize = 1800;
+const MAX_FALLBACK_ACCOMPLISHMENTS: usize = 5;
+const MAX_FALLBACK_LEARNINGS: usize = 3;
+const MAX_FALLBACK_TEACHING_ANGLES: usize = 3;
 
 #[derive(Debug, Clone)]
 pub(crate) struct SessionResearchBundle {
@@ -61,10 +72,12 @@ pub(crate) async fn generate_deep_dive_with_progress(
     backend: &LlmBackend,
     session_source: &str,
     session: Session,
+    sections: DeepDiveSectionsConfig,
     progress_sender: impl Into<Option<&Sender<AiTaskMessage>>>,
 ) -> Result<DeepDiveGenerationResult> {
     let sender = progress_sender.into();
     let bundle = build_session_research_bundle(session_source, &session);
+    let request_options = LlmRequestOptions::session_deep_dive();
 
     if let Some(sender) = sender {
         send_progress(sender, "Preparing session research bundle...", 20);
@@ -75,13 +88,39 @@ pub(crate) async fn generate_deep_dive_with_progress(
         send_progress(sender, "Planning deep-dive research...", 35);
     }
 
-    let (mut plan, plan_usage) = backend
-        .extract_typed::<DeepDiveResearchPlan>(
-            deep_dive_plan_preamble(),
-            &plan_prompt,
-            "deep-dive research plan",
-        )
-        .await?;
+    let (mut plan, plan_usage) = if should_skip_llm_research_plan(backend) {
+        if let Some(sender) = sender {
+            send_progress(
+                sender,
+                "Using a compact local research plan for Codex CLI...",
+                45,
+            );
+        }
+        (build_fallback_research_plan(&bundle), None)
+    } else {
+        match backend
+            .extract_typed_with_options::<DeepDiveResearchPlan>(
+                deep_dive_plan_preamble(),
+                &plan_prompt,
+                "deep-dive research plan",
+                request_options,
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(err) if err.to_string().contains("timed out") => {
+                if let Some(sender) = sender {
+                    send_progress(
+                        sender,
+                        "Research planning timed out, using a compact local fallback...",
+                        45,
+                    );
+                }
+                (build_fallback_research_plan(&bundle), None)
+            }
+            Err(err) => return Err(err),
+        }
+    };
 
     plan.selected_urls = sanitize_selected_urls(&bundle.external_urls, &plan.selected_urls);
 
@@ -98,10 +137,11 @@ pub(crate) async fn generate_deep_dive_with_progress(
     let final_prompt =
         build_final_deep_dive_prompt(&bundle, &plan, &fetched_sources, &fetch_failures);
     let (mut response, final_usage) = backend
-        .extract_typed::<StructuredDeepDiveResponse>(
+        .extract_typed_with_options::<StructuredDeepDiveResponse>(
             deep_dive_final_preamble(),
             &final_prompt,
             "structured deep-dive response",
+            request_options,
         )
         .await?;
 
@@ -135,7 +175,8 @@ pub(crate) async fn generate_deep_dive_with_progress(
         reviewed_url_count: response.reviewed_sources.len(),
     };
 
-    let markdown = render_deep_dive_markdown(&metadata, &response, &bundle.external_urls);
+    let markdown =
+        render_deep_dive_markdown(&metadata, &response, &bundle.external_urls, &sections);
     let document = OutputManager::new()
         .write_deep_dive_markdown(&metadata, &markdown)
         .map_err(|err| eyre!(err))?;
@@ -143,9 +184,14 @@ pub(crate) async fn generate_deep_dive_with_progress(
     let usage = merge_usage(plan_usage, final_usage);
     Ok(DeepDiveGenerationResult {
         document,
+        response,
         usage,
         reviewed_source_failures: fetch_failures,
     })
+}
+
+fn should_skip_llm_research_plan(backend: &LlmBackend) -> bool {
+    backend.provider() == AiProvider::CodexCli
 }
 
 pub(crate) fn select_balanced_events(
@@ -210,78 +256,91 @@ pub(crate) fn render_deep_dive_markdown(
     metadata: &DeepDiveArtifactMetadata,
     response: &StructuredDeepDiveResponse,
     external_urls: &[String],
+    sections: &DeepDiveSectionsConfig,
 ) -> String {
     let mut markdown = Vec::new();
     markdown.push(format!("# {}", response.title));
     markdown.push(String::new());
-    markdown.push("## Session Metadata".to_string());
-    markdown.push(format!("- Session source: {}", metadata.session_source));
-    markdown.push(format!("- Session date: {}", metadata.session_date));
-    markdown.push(format!("- Session id: {}", metadata.session_id));
-    markdown.push(format!("- Project: {}", metadata.project_name));
-    markdown.push(format!("- Working directory: {}", metadata.project_cwd));
-    markdown.push(format!("- Source file: {}", metadata.source_file));
-    markdown.push(String::new());
-    markdown.push("## Goal".to_string());
-    markdown.push(response.goal.clone());
-    markdown.push(String::new());
-    markdown.push("## What Was Accomplished".to_string());
-    push_bullets(&mut markdown, &response.accomplishments);
-    markdown.push(String::new());
-    markdown.push("## Interesting or Unexpected Learnings".to_string());
-    push_bullets(&mut markdown, &response.interesting_learnings);
-    markdown.push(String::new());
-    markdown.push("## Teaching Narrative".to_string());
-    if response.teaching_narrative.is_empty() {
-        markdown.push("No teaching narrative was provided.".to_string());
-    } else {
-        markdown.extend(response.teaching_narrative.iter().cloned());
+    if sections.session_metadata {
+        markdown.push("## Session Metadata".to_string());
+        markdown.push(format!("- Session source: {}", metadata.session_source));
+        markdown.push(format!("- Session date: {}", metadata.session_date));
+        markdown.push(format!("- Session id: {}", metadata.session_id));
+        markdown.push(format!("- Project: {}", metadata.project_name));
+        markdown.push(format!("- Working directory: {}", metadata.project_cwd));
+        markdown.push(format!("- Source file: {}", metadata.source_file));
+        markdown.push(String::new());
     }
-    markdown.push(String::new());
-    markdown.push("## Reviewed External Sources".to_string());
-    if response.reviewed_sources.is_empty() {
-        markdown.push("No external sources were reviewed during generation.".to_string());
-    } else {
-        for source in &response.reviewed_sources {
-            markdown.push(format!("### {}", source.url));
-            markdown.push(source.summary.clone());
-            markdown.push(String::new());
-            markdown.push(format!("Why it mattered: {}", source.why_it_matters));
-            markdown.push(String::new());
+    if sections.goal {
+        markdown.push("## Goal".to_string());
+        markdown.push(response.goal.clone());
+        markdown.push(String::new());
+    }
+    if sections.accomplishments {
+        markdown.push("## What Was Accomplished".to_string());
+        push_bullets(&mut markdown, &response.accomplishments);
+        markdown.push(String::new());
+    }
+    if sections.interesting_learnings {
+        markdown.push("## Interesting or Unexpected Learnings".to_string());
+        push_bullets(&mut markdown, &response.interesting_learnings);
+        markdown.push(String::new());
+    }
+    if sections.teaching_narrative {
+        markdown.push("## Teaching Narrative".to_string());
+        if response.teaching_narrative.is_empty() {
+            markdown.push("No teaching narrative was provided.".to_string());
+        } else {
+            markdown.extend(response.teaching_narrative.iter().cloned());
+        }
+        markdown.push(String::new());
+    }
+    if sections.reviewed_external_sources {
+        markdown.push("## Reviewed External Sources".to_string());
+        if response.reviewed_sources.is_empty() {
+            markdown.push("No external sources were reviewed during generation.".to_string());
+        } else {
+            for source in &response.reviewed_sources {
+                markdown.push(format!("### {}", source.url));
+                markdown.push(source.summary.clone());
+                markdown.push(String::new());
+                markdown.push(format!("Why it mattered: {}", source.why_it_matters));
+                markdown.push(String::new());
+            }
         }
     }
-    markdown.push("## Referenced URLs".to_string());
-    if external_urls.is_empty() {
-        markdown.push("No external URLs were referenced in the session.".to_string());
-    } else {
-        for url in external_urls {
-            markdown.push(format!("- {}", url));
+    if sections.referenced_urls {
+        markdown.push("## Referenced URLs".to_string());
+        if external_urls.is_empty() {
+            markdown.push("No external URLs were referenced in the session.".to_string());
+        } else {
+            for url in external_urls {
+                markdown.push(format!("- {}", url));
+            }
         }
     }
     markdown.join("\n")
 }
 
 fn build_research_plan_prompt(bundle: &SessionResearchBundle) -> String {
-    let first_user_prompt = bundle
-        .session
-        .first_user_prompt
-        .as_deref()
-        .unwrap_or("No initial user prompt was captured.");
-    let event_details = bundle
-        .selected_events
-        .iter()
-        .map(|event| {
-            format!(
-                "- {} | {} | texts={} | arguments={} | output={}",
-                event.timestamp,
-                event.payload_type,
-                truncate_for_prompt(&event.content_texts.join(" | "), 400),
-                truncate_for_prompt(event.arguments.as_deref().unwrap_or(""), 300),
-                truncate_for_prompt(event.output.as_deref().unwrap_or(""), 300)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let first_user_prompt = truncate_for_prompt(
+        bundle
+            .session
+            .first_user_prompt
+            .as_deref()
+            .unwrap_or("No initial user prompt was captured."),
+        MAX_FIRST_PROMPT_CHARS,
+    );
+    let event_details = if bundle.selected_events.is_empty() {
+        "- No qualifying events were captured.".to_string()
+    } else {
+        bundle
+            .selected_events
+            .iter()
+            .map(format_event_for_research_plan)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     let urls = if bundle.external_urls.is_empty() {
         "No external URLs were referenced.".to_string()
     } else {
@@ -349,7 +408,7 @@ fn build_final_deep_dive_prompt(
                 format!(
                     "URL: {}\nContent digest:\n{}\n",
                     source.url,
-                    truncate_for_prompt(&source.summary_text, 2400)
+                    truncate_for_prompt(&source.summary_text, MAX_FETCHED_SOURCE_CHARS)
                 )
             })
             .collect::<Vec<_>>()
@@ -382,11 +441,180 @@ fn build_final_deep_dive_prompt(
 }
 
 fn deep_dive_plan_preamble() -> &'static str {
-    "You are preparing a session deep-dive research plan. Infer the session goal, extract likely accomplishments and learnings, and choose at most five URLs from the provided inventory for follow-up review. Never invent URLs and never select a URL that is not in the provided inventory."
+    "You are preparing a quick first-pass session deep-dive research plan. Do not spend time on hidden planning or exhaustive analysis. Use the provided digest as-is, make the best immediate inference, keep items concise, and prefer returning fewer items over deliberating longer. Choose at most five URLs from the provided inventory for follow-up review. Never invent URLs and never select a URL that is not in the provided inventory."
 }
 
 fn deep_dive_final_preamble() -> &'static str {
     "You are writing a precise, educational deep dive for a coding session. Base your answer on the provided session digest and fetched source notes. Explain what the user would have learned by implementing the feature themselves. Only reference URLs from the provided session inventory."
+}
+
+fn format_event_for_research_plan(event: &SessionEvent) -> String {
+    let mut parts = Vec::new();
+    let text_digest = event
+        .content_texts
+        .iter()
+        .map(|text| text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    if !text_digest.is_empty() {
+        parts.push(format!(
+            "texts={}",
+            truncate_for_prompt(&text_digest, MAX_PLAN_EVENT_TEXT_CHARS)
+        ));
+    }
+    if let Some(arguments) = event.arguments.as_deref().map(str::trim)
+        && !arguments.is_empty()
+    {
+        parts.push(format!(
+            "arguments={}",
+            truncate_for_prompt(arguments, MAX_PLAN_ARGUMENT_CHARS)
+        ));
+    }
+    if let Some(output) = event.output.as_deref().map(str::trim)
+        && !output.is_empty()
+    {
+        parts.push(format!(
+            "output={}",
+            truncate_for_prompt(output, MAX_PLAN_OUTPUT_CHARS)
+        ));
+    }
+
+    if parts.is_empty() {
+        format!("- {} | {}", event.timestamp, event.payload_type)
+    } else {
+        format!(
+            "- {} | {} | {}",
+            event.timestamp,
+            event.payload_type,
+            parts.join(" | ")
+        )
+    }
+}
+
+fn build_fallback_research_plan(bundle: &SessionResearchBundle) -> DeepDiveResearchPlan {
+    let mut candidate_accomplishments = Vec::new();
+    if !bundle.session.summary.trim().is_empty() {
+        push_unique_bounded(
+            &mut candidate_accomplishments,
+            truncate_for_prompt(bundle.session.summary.trim(), MAX_PLAN_EVENT_TEXT_CHARS),
+            MAX_FALLBACK_ACCOMPLISHMENTS,
+        );
+    }
+
+    for event in &bundle.selected_events {
+        for candidate in event
+            .content_texts
+            .iter()
+            .map(|text| text.trim())
+            .chain(event.output.iter().map(|text| text.trim()))
+        {
+            if candidate.is_empty() || candidate.starts_with("cwd:") {
+                continue;
+            }
+            push_unique_bounded(
+                &mut candidate_accomplishments,
+                truncate_for_prompt(candidate, MAX_PLAN_EVENT_TEXT_CHARS),
+                MAX_FALLBACK_ACCOMPLISHMENTS,
+            );
+            if candidate_accomplishments.len() == MAX_FALLBACK_ACCOMPLISHMENTS {
+                break;
+            }
+        }
+        if candidate_accomplishments.len() == MAX_FALLBACK_ACCOMPLISHMENTS {
+            break;
+        }
+    }
+
+    if candidate_accomplishments.is_empty() {
+        candidate_accomplishments.push("The transcript captured concrete implementation work, but no concise accomplishment summary was available.".to_string());
+    }
+
+    let mut candidate_interesting_learnings = Vec::new();
+    if !bundle.external_urls.is_empty() {
+        push_unique_bounded(
+            &mut candidate_interesting_learnings,
+            "The session cross-checked implementation details against external references mentioned in the transcript.".to_string(),
+            MAX_FALLBACK_LEARNINGS,
+        );
+    }
+    if bundle
+        .selected_events
+        .iter()
+        .any(|event| event.payload_type.contains("function"))
+    {
+        push_unique_bounded(
+            &mut candidate_interesting_learnings,
+            "The workflow alternated between reasoning steps and tool-driven actions instead of staying purely conceptual.".to_string(),
+            MAX_FALLBACK_LEARNINGS,
+        );
+    }
+    push_unique_bounded(
+        &mut candidate_interesting_learnings,
+        "The session can be explained as a sequence of small implementation decisions rather than a single large code dump.".to_string(),
+        MAX_FALLBACK_LEARNINGS,
+    );
+
+    let mut teaching_angles = Vec::new();
+    push_unique_bounded(
+        &mut teaching_angles,
+        format!(
+            "Explain how the session moved from the initial request to concrete changes in {}.",
+            bundle.project_name
+        ),
+        MAX_FALLBACK_TEACHING_ANGLES,
+    );
+    push_unique_bounded(
+        &mut teaching_angles,
+        "Highlight the implementation tradeoffs and why the chosen path fit the session constraints.".to_string(),
+        MAX_FALLBACK_TEACHING_ANGLES,
+    );
+    if !bundle.external_urls.is_empty() {
+        push_unique_bounded(
+            &mut teaching_angles,
+            "Connect the implementation back to the external references that appeared in the session.".to_string(),
+            MAX_FALLBACK_TEACHING_ANGLES,
+        );
+    }
+
+    DeepDiveResearchPlan {
+        inferred_goal: infer_fallback_goal(bundle),
+        candidate_accomplishments,
+        candidate_interesting_learnings,
+        teaching_angles,
+        selected_urls: bundle
+            .external_urls
+            .iter()
+            .take(MAX_REVIEW_URLS)
+            .cloned()
+            .collect(),
+    }
+}
+
+fn infer_fallback_goal(bundle: &SessionResearchBundle) -> String {
+    if let Some(prompt) = bundle.session.first_user_prompt.as_deref() {
+        let trimmed = prompt.trim();
+        if !trimmed.is_empty() {
+            return truncate_for_prompt(trimmed, MAX_FIRST_PROMPT_CHARS);
+        }
+    }
+    if !bundle.session.summary.trim().is_empty() {
+        return truncate_for_prompt(bundle.session.summary.trim(), MAX_FIRST_PROMPT_CHARS);
+    }
+    format!(
+        "Summarize the implementation work captured in session {} for {}.",
+        bundle.session.id, bundle.project_name
+    )
+}
+
+fn push_unique_bounded(items: &mut Vec<String>, candidate: String, max_items: usize) {
+    if items.len() >= max_items {
+        return;
+    }
+    if items.iter().any(|existing| existing == &candidate) {
+        return;
+    }
+    items.push(candidate);
 }
 
 fn sanitize_selected_urls(inventory: &[String], selected: &[String]) -> Vec<String> {
@@ -600,6 +828,7 @@ fn push_bullets(markdown: &mut Vec<String>, items: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{AiProvider, ResolvedLlmConfig};
     use crate::llm::DeepDiveArtifactMetadata;
     use std::path::PathBuf;
 
@@ -608,6 +837,7 @@ mod tests {
             id: "session-123".to_string(),
             date: "2026-03-06".to_string(),
             timestamp: "2026-03-06T12:00:00Z".to_string(),
+            cwd: "/workspace/learnchain".to_string(),
             summary: "Add deep-dive support".to_string(),
             first_user_prompt: Some(
                 "Use docs at https://docs.rs/reqwest and https://ratatui.rs".to_string(),
@@ -624,7 +854,7 @@ mod tests {
                     output: Some("See https://github.com/0xPlaygrounds/rig".to_string()),
                     content_texts: vec![
                         "Read https://ratatui.rs/examples/".to_string(),
-                        "cwd: /Users/davidnorman/learnchain".to_string(),
+                        "cwd: /workspace/learnchain".to_string(),
                     ],
                 },
                 SessionEvent {
@@ -678,7 +908,7 @@ mod tests {
             session_timestamp: "2026-03-06T12:00:00Z".to_string(),
             session_date: "2026-03-06".to_string(),
             project_name: "learnchain".to_string(),
-            project_cwd: "/Users/davidnorman/learnchain".to_string(),
+            project_cwd: "/workspace/learnchain".to_string(),
             source_file: "/tmp/session.jsonl".to_string(),
             referenced_url_count: 2,
             reviewed_url_count: 1,
@@ -696,8 +926,12 @@ mod tests {
             }],
         };
 
-        let markdown =
-            render_deep_dive_markdown(&metadata, &response, &["https://ratatui.rs/".to_string()]);
+        let markdown = render_deep_dive_markdown(
+            &metadata,
+            &response,
+            &["https://ratatui.rs/".to_string()],
+            &DeepDiveSectionsConfig::default(),
+        );
         let goal = markdown.find("## Goal").unwrap();
         let accomplished = markdown.find("## What Was Accomplished").unwrap();
         let learnings = markdown
@@ -711,5 +945,124 @@ mod tests {
         assert!(learnings < narrative);
         assert!(narrative < reviewed);
         assert!(reviewed < urls);
+    }
+
+    #[test]
+    fn render_deep_dive_markdown_omits_disabled_sections() {
+        let metadata = DeepDiveArtifactMetadata {
+            artifact_type: "session_deep_dive".to_string(),
+            title: "Deep Dive".to_string(),
+            generated_at: "2026-03-06T12:00:00Z".to_string(),
+            session_source: "Codex CLI".to_string(),
+            session_id: "session-123".to_string(),
+            session_timestamp: "2026-03-06T12:00:00Z".to_string(),
+            session_date: "2026-03-06".to_string(),
+            project_name: "learnchain".to_string(),
+            project_cwd: "/workspace/learnchain".to_string(),
+            source_file: "/tmp/session.jsonl".to_string(),
+            referenced_url_count: 2,
+            reviewed_url_count: 1,
+        };
+        let response = StructuredDeepDiveResponse {
+            title: "Deep Dive".to_string(),
+            goal: "Ship the feature".to_string(),
+            accomplishments: vec!["Added a picker".to_string()],
+            interesting_learnings: vec!["Learned about scroll handling".to_string()],
+            teaching_narrative: vec!["The implementation used shared state.".to_string()],
+            reviewed_sources: vec![DeepDiveReviewedSource {
+                url: "https://ratatui.rs/".to_string(),
+                summary: "Docs summary".to_string(),
+                why_it_matters: "Explains scrolling.".to_string(),
+            }],
+        };
+        let sections = DeepDiveSectionsConfig {
+            session_metadata: false,
+            goal: true,
+            accomplishments: false,
+            interesting_learnings: true,
+            teaching_narrative: false,
+            reviewed_external_sources: false,
+            referenced_urls: true,
+        };
+
+        let markdown = render_deep_dive_markdown(
+            &metadata,
+            &response,
+            &["https://ratatui.rs/".to_string()],
+            &sections,
+        );
+
+        assert!(markdown.contains("# Deep Dive"));
+        assert!(markdown.contains("## Goal"));
+        assert!(markdown.contains("## Interesting or Unexpected Learnings"));
+        assert!(markdown.contains("## Referenced URLs"));
+        assert!(!markdown.contains("## Session Metadata"));
+        assert!(!markdown.contains("## What Was Accomplished"));
+        assert!(!markdown.contains("## Teaching Narrative"));
+        assert!(!markdown.contains("## Reviewed External Sources"));
+    }
+
+    #[test]
+    fn format_event_for_research_plan_skips_empty_fields() {
+        let event = SessionEvent {
+            timestamp: "2026-03-06T12:00:00Z".to_string(),
+            payload_type: "message".to_string(),
+            call_id: None,
+            arguments: Some(String::new()),
+            output: None,
+            content_texts: vec!["First change".to_string(), "  ".to_string()],
+        };
+
+        let formatted = format_event_for_research_plan(&event);
+
+        assert!(formatted.contains("texts=First change"));
+        assert!(!formatted.contains("arguments="));
+        assert!(!formatted.contains("output="));
+    }
+
+    #[test]
+    fn fallback_research_plan_limits_urls_and_uses_prompt_as_goal() {
+        let mut session = sample_session();
+        session.first_user_prompt = Some("Ship the session deep-dive flow".to_string());
+        session.summary = "Deep-dive generation work".to_string();
+        session.events.push(SessionEvent {
+            timestamp: "2026-03-06T12:10:00Z".to_string(),
+            payload_type: "message".to_string(),
+            call_id: None,
+            arguments: None,
+            output: Some("Added timeout fallback".to_string()),
+            content_texts: vec!["Updated Codex CLI defaults".to_string()],
+        });
+
+        let bundle = build_session_research_bundle("Codex CLI", &session);
+        let plan = build_fallback_research_plan(&bundle);
+
+        assert_eq!(plan.inferred_goal, "Ship the session deep-dive flow");
+        assert!(!plan.candidate_accomplishments.is_empty());
+        assert!(plan.selected_urls.len() <= MAX_REVIEW_URLS);
+    }
+
+    #[test]
+    fn codex_cli_skips_llm_research_plan() {
+        let backend = LlmBackend::from_config(
+            ResolvedLlmConfig {
+                provider: AiProvider::CodexCli,
+                model_name: "codex-exec".to_string(),
+                model_label: "CLI default".to_string(),
+                api_key: String::new(),
+            },
+            "output",
+        )
+        .unwrap();
+
+        assert!(should_skip_llm_research_plan(&backend));
+    }
+
+    #[test]
+    fn deep_dive_plan_preamble_requests_fast_first_pass() {
+        let preamble = deep_dive_plan_preamble();
+
+        assert!(preamble.contains("quick first-pass"));
+        assert!(preamble.contains("Do not spend time on hidden planning"));
     }
 }

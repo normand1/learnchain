@@ -1928,6 +1928,7 @@ impl<'a> UiRenderer<'a> {
 
         let sections = [
             config::ConfigSection::Session,
+            config::ConfigSection::DeepDive,
             config::ConfigSection::Export,
             config::ConfigSection::Ai,
         ];
@@ -2068,8 +2069,9 @@ impl<'a> UiRenderer<'a> {
     fn config_section_index(section: config::ConfigSection) -> usize {
         match section {
             config::ConfigSection::Session => 0,
-            config::ConfigSection::Export => 1,
-            config::ConfigSection::Ai => 2,
+            config::ConfigSection::DeepDive => 1,
+            config::ConfigSection::Export => 2,
+            config::ConfigSection::Ai => 3,
         }
     }
 
@@ -2080,6 +2082,11 @@ impl<'a> UiRenderer<'a> {
                 app.config_form.session_source.label(),
                 app.config_form.max_events,
                 app.config_form.sampling_percentage
+            ),
+            config::ConfigSection::DeepDive => format!(
+                "{} / {} sections enabled",
+                app.config_form.deep_dive_sections.enabled_count(),
+                config::DeepDiveSectionsConfig::total_count()
             ),
             config::ConfigSection::Export => {
                 let repository = app.config_form.document_repository.label();
@@ -2116,6 +2123,19 @@ impl<'a> UiRenderer<'a> {
             config::ConfigField::MinQuiz => "Minimum quiz questions".to_string(),
             config::ConfigField::SamplingPercentage => "Event sampling percent".to_string(),
             config::ConfigField::SessionSource => "Session source".to_string(),
+            config::ConfigField::DeepDiveSessionMetadata => "Include session metadata".to_string(),
+            config::ConfigField::DeepDiveGoal => "Include goal".to_string(),
+            config::ConfigField::DeepDiveAccomplishments => "Include accomplishments".to_string(),
+            config::ConfigField::DeepDiveInterestingLearnings => {
+                "Include interesting learnings".to_string()
+            }
+            config::ConfigField::DeepDiveTeachingNarrative => {
+                "Include teaching narrative".to_string()
+            }
+            config::ConfigField::DeepDiveReviewedExternalSources => {
+                "Include reviewed external sources".to_string()
+            }
+            config::ConfigField::DeepDiveReferencedUrls => "Include referenced URLs".to_string(),
             config::ConfigField::OutputArtifacts => "Write quiz artifacts to output".to_string(),
             config::ConfigField::DocumentRepository => "Document repository".to_string(),
             config::ConfigField::DocumentRepositoryTarget => {
@@ -2126,8 +2146,8 @@ impl<'a> UiRenderer<'a> {
             }
             config::ConfigField::NotionApiToken => "Notion API token".to_string(),
             config::ConfigField::LearnChainSiteUrl => "LearnChain site URL".to_string(),
-            config::ConfigField::LearnChainEmail => "LearnChain email".to_string(),
-            config::ConfigField::LearnChainPassword => "LearnChain password".to_string(),
+            config::ConfigField::LearnChainEmail => "Linked LearnChain account".to_string(),
+            config::ConfigField::LearnChainAuthCode => "LearnChain login code".to_string(),
             config::ConfigField::AiProvider => "AI provider".to_string(),
             config::ConfigField::OpenAiModel => "OpenAI model".to_string(),
             config::ConfigField::OpenAiKey => "OpenAI API key".to_string(),
@@ -2147,6 +2167,27 @@ impl<'a> UiRenderer<'a> {
             }
             config::ConfigField::SessionSource => {
                 app.config_form.session_source.label().to_string()
+            }
+            config::ConfigField::DeepDiveSessionMetadata => {
+                Self::checkbox_value(app.config_form.deep_dive_sections.session_metadata)
+            }
+            config::ConfigField::DeepDiveGoal => {
+                Self::checkbox_value(app.config_form.deep_dive_sections.goal)
+            }
+            config::ConfigField::DeepDiveAccomplishments => {
+                Self::checkbox_value(app.config_form.deep_dive_sections.accomplishments)
+            }
+            config::ConfigField::DeepDiveInterestingLearnings => {
+                Self::checkbox_value(app.config_form.deep_dive_sections.interesting_learnings)
+            }
+            config::ConfigField::DeepDiveTeachingNarrative => {
+                Self::checkbox_value(app.config_form.deep_dive_sections.teaching_narrative)
+            }
+            config::ConfigField::DeepDiveReviewedExternalSources => {
+                Self::checkbox_value(app.config_form.deep_dive_sections.reviewed_external_sources)
+            }
+            config::ConfigField::DeepDiveReferencedUrls => {
+                Self::checkbox_value(app.config_form.deep_dive_sections.referenced_urls)
             }
             config::ConfigField::OutputArtifacts => {
                 if app.config_form.write_output_artifacts {
@@ -2187,24 +2228,24 @@ impl<'a> UiRenderer<'a> {
                 }
             }
             config::ConfigField::LearnChainEmail => {
-                if app.config_form.is_editing_learnchain_email() {
-                    let value = app.config_form.learnchain_email_buffer();
+                if app.config_form.learnchain_email.trim().is_empty() {
+                    "<not linked>".to_string()
+                } else {
+                    app.config_form.learnchain_email.clone()
+                }
+            }
+            config::ConfigField::LearnChainAuthCode => {
+                if app.config_form.is_editing_learnchain_auth_code() {
+                    let value = app.config_form.learnchain_auth_code_buffer();
                     if value.is_empty() {
                         "<editing empty value>".to_string()
                     } else {
                         value.to_string()
                     }
-                } else if app.config_form.learnchain_email.trim().is_empty() {
-                    "<not set>".to_string()
+                } else if app.config_form.learnchain_auth_code.trim().is_empty() {
+                    "<paste code from dashboard>".to_string()
                 } else {
-                    app.config_form.learnchain_email.clone()
-                }
-            }
-            config::ConfigField::LearnChainPassword => {
-                if app.config_form.is_editing_learnchain_password() {
-                    app.config_form.masked_learnchain_password_buffer()
-                } else {
-                    app.config_form.masked_learnchain_password()
+                    app.config_form.learnchain_auth_code.clone()
                 }
             }
             config::ConfigField::AiProvider => app.config_form.ai_provider.label().to_string(),
@@ -2264,6 +2305,28 @@ impl<'a> UiRenderer<'a> {
             config::ConfigField::SessionSource => {
                 "Switches which coding assistant history LearnChain loads.".to_string()
             }
+            config::ConfigField::DeepDiveSessionMetadata => {
+                "Shows the session source, date, ids, and working directory in the document."
+                    .to_string()
+            }
+            config::ConfigField::DeepDiveGoal => {
+                "Keeps the short goal statement near the top of each deep dive.".to_string()
+            }
+            config::ConfigField::DeepDiveAccomplishments => {
+                "Keeps the completed work summary as a bullet list.".to_string()
+            }
+            config::ConfigField::DeepDiveInterestingLearnings => {
+                "Keeps the notable learnings and surprises section.".to_string()
+            }
+            config::ConfigField::DeepDiveTeachingNarrative => {
+                "Keeps the longer educational walkthrough section.".to_string()
+            }
+            config::ConfigField::DeepDiveReviewedExternalSources => {
+                "Keeps the source review section for fetched external references.".to_string()
+            }
+            config::ConfigField::DeepDiveReferencedUrls => {
+                "Keeps the raw URL inventory found in the session transcript.".to_string()
+            }
             config::ConfigField::OutputArtifacts => {
                 "Controls whether quiz JSON artifacts are saved under output/.".to_string()
             }
@@ -2285,10 +2348,11 @@ impl<'a> UiRenderer<'a> {
                 "Defines which LearnChain server receives uploaded artifacts.".to_string()
             }
             config::ConfigField::LearnChainEmail => {
-                "Supplies the account email used for LearnChain uploads.".to_string()
+                "Shows which LearnChain account is currently linked for export.".to_string()
             }
-            config::ConfigField::LearnChainPassword => {
-                "Supplies the account password used for LearnChain uploads.".to_string()
+            config::ConfigField::LearnChainAuthCode => {
+                "Stores a one-time code generated from the LearnChain dashboard until you save."
+                    .to_string()
             }
             config::ConfigField::AiProvider => {
                 "Chooses the backend used for quizzes and deep-dive generation.".to_string()
@@ -2328,6 +2392,28 @@ impl<'a> UiRenderer<'a> {
             config::ConfigField::SessionSource => {
                 "Changing this switches where the session picker and latest-session loader read history from across the app.".to_string()
             }
+            config::ConfigField::DeepDiveSessionMetadata => {
+                "Disable this if you want cleaner deep dives that skip session bookkeeping details."
+                    .to_string()
+            }
+            config::ConfigField::DeepDiveGoal => {
+                "This removes the explicit goal section from future deep dives while leaving the rest of the document intact.".to_string()
+            }
+            config::ConfigField::DeepDiveAccomplishments => {
+                "This controls whether future deep dives include the concrete work summary section.".to_string()
+            }
+            config::ConfigField::DeepDiveInterestingLearnings => {
+                "This controls whether future deep dives call out notable lessons or surprises separately.".to_string()
+            }
+            config::ConfigField::DeepDiveTeachingNarrative => {
+                "This controls whether future deep dives include the longer explanatory teaching walkthrough.".to_string()
+            }
+            config::ConfigField::DeepDiveReviewedExternalSources => {
+                "Turning this off hides the fetched-source writeup even when LearnChain reviewed external URLs during generation.".to_string()
+            }
+            config::ConfigField::DeepDiveReferencedUrls => {
+                "Turning this off hides the raw reference list at the bottom of future deep dives.".to_string()
+            }
             config::ConfigField::OutputArtifacts => {
                 "When enabled, quiz JSON is written to disk in output/ so it can be revisited later from the Library or inspected manually.".to_string()
             }
@@ -2348,10 +2434,10 @@ impl<'a> UiRenderer<'a> {
                 "Uploads are sent to this base URL, and the signup link in help text is built from it.".to_string()
             }
             config::ConfigField::LearnChainEmail => {
-                "This email is used only for authenticating export requests to the LearnChain service.".to_string()
+                "Press Enter on this field to clear the stored LearnChain session and unlink the current account.".to_string()
             }
-            config::ConfigField::LearnChainPassword => {
-                "This password is stored in config and used only when the app uploads documents to LearnChain.".to_string()
+            config::ConfigField::LearnChainAuthCode => {
+                "When you save with a code present, LearnChain exchanges it for a refreshable CLI session and clears the code from config.".to_string()
             }
             config::ConfigField::AiProvider => {
                 "Changing the provider changes the visible model and credential fields and decides which backend serves every generation request.".to_string()
@@ -2386,13 +2472,25 @@ impl<'a> UiRenderer<'a> {
                 config::ConfigField::DocumentRepositoryTarget
                 | config::ConfigField::NotionApiToken
                 | config::ConfigField::LearnChainSiteUrl
-                | config::ConfigField::LearnChainEmail
-                | config::ConfigField::LearnChainPassword
+                | config::ConfigField::LearnChainAuthCode
                 | config::ConfigField::OpenAiKey
                 | config::ConfigField::AnthropicKey
                 | config::ConfigField::OpenRouterModel
                 | config::ConfigField::OpenRouterKey => {
                     "Press Enter to edit this text field. Paste is supported while editing."
+                        .to_string()
+                }
+                config::ConfigField::LearnChainEmail => {
+                    "Press Enter to clear the stored LearnChain account link.".to_string()
+                }
+                config::ConfigField::DeepDiveSessionMetadata
+                | config::ConfigField::DeepDiveGoal
+                | config::ConfigField::DeepDiveAccomplishments
+                | config::ConfigField::DeepDiveInterestingLearnings
+                | config::ConfigField::DeepDiveTeachingNarrative
+                | config::ConfigField::DeepDiveReviewedExternalSources
+                | config::ConfigField::DeepDiveReferencedUrls => {
+                    "Use Left/Right (or h/l) to toggle this checkbox, then press s to save."
                         .to_string()
                 }
                 _ => "Use Left/Right (or h/l) to cycle or adjust this value, then press s to save."
@@ -2416,10 +2514,10 @@ impl<'a> UiRenderer<'a> {
             }
             config::ConfigField::LearnChainSiteUrl
             | config::ConfigField::LearnChainEmail
-            | config::ConfigField::LearnChainPassword
+            | config::ConfigField::LearnChainAuthCode
                 if app.config_form.document_repository == config::DocumentRepositoryKind::LearnChain =>
             {
-                Some(config::learnchain_credentials_help_message(
+                Some(config::learnchain_authorization_help_message(
                     &app.config_form.learnchain_site_url,
                 ))
             }
@@ -2427,6 +2525,15 @@ impl<'a> UiRenderer<'a> {
                 if app.config_form.ai_provider == config::AiProvider::CodexCli =>
             {
                 Some(config::codex_cli_config_help_message().to_string())
+            }
+            config::ConfigField::DeepDiveSessionMetadata
+            | config::ConfigField::DeepDiveGoal
+            | config::ConfigField::DeepDiveAccomplishments
+            | config::ConfigField::DeepDiveInterestingLearnings
+            | config::ConfigField::DeepDiveTeachingNarrative
+            | config::ConfigField::DeepDiveReviewedExternalSources
+            | config::ConfigField::DeepDiveReferencedUrls => {
+                Some("The document title is always kept. These checkboxes control the markdown sections underneath it.".to_string())
             }
             config::ConfigField::OpenAiKey
                 if app.config_form.openai_api_key.trim().is_empty() =>
@@ -2449,6 +2556,14 @@ impl<'a> UiRenderer<'a> {
                 Some(config::AiProvider::OpenRouter.setup_help().to_string())
             }
             _ => None,
+        }
+    }
+
+    fn checkbox_value(enabled: bool) -> String {
+        if enabled {
+            "[x]".to_string()
+        } else {
+            "[ ]".to_string()
         }
     }
 

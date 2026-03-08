@@ -1,4 +1,7 @@
-use super::{SessionEvent, SessionLoad, SessionSource, append_error, merge_errors};
+use super::{
+    MultiSessionLoad, Session, SessionEvent, SessionFileMetadata, SessionLoad, SessionSource,
+    append_error, group_events_by_session_with_metadata, merge_errors,
+};
 use chrono::{DateTime, Local};
 use serde::Deserialize;
 use serde_json::Value;
@@ -15,6 +18,20 @@ pub struct CodexCliSource {
     root_dir: PathBuf,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CodexSessionFileMetadata {
+    pub id: String,
+    pub timestamp: Option<String>,
+    pub cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ParsedCodexSessionFile {
+    pub metadata: Option<CodexSessionFileMetadata>,
+    pub events: Vec<SessionEvent>,
+    pub error: Option<String>,
+}
+
 impl CodexCliSource {
     pub(crate) fn default() -> Self {
         Self::with_root(default_session_root())
@@ -25,6 +42,55 @@ impl CodexCliSource {
             label: "Codex CLI".to_string(),
             root_dir,
         }
+    }
+
+    pub(crate) fn load_latest_session(&self) -> Result<Session, String> {
+        let (latest_file, traversal_error) = self.find_latest_recursively(&self.root_dir);
+        let path = latest_file.ok_or_else(|| {
+            traversal_error.unwrap_or_else(|| {
+                format!(
+                    "No Codex session files were found in {}.",
+                    self.root_dir.display()
+                )
+            })
+        })?;
+        self.load_session_from_path(&path)
+    }
+
+    pub(crate) fn load_session_by_id(&self, session_id: &str) -> Result<Session, String> {
+        let (path, traversal_error) =
+            self.find_file_by_session_id_recursively(&self.root_dir, session_id);
+        let path = path.ok_or_else(|| {
+            traversal_error.unwrap_or_else(|| {
+                format!("No Codex session file matched session id '{}'.", session_id)
+            })
+        })?;
+        self.load_session_from_path(&path)
+    }
+
+    pub(crate) fn load_session_from_path(&self, path: &Path) -> Result<Session, String> {
+        let parsed = parse_codex_session_file_with_metadata(path);
+        let metadata = parsed.metadata.clone().ok_or_else(|| {
+            format!(
+                "Codex session metadata was missing from {}.",
+                path.display()
+            )
+        })?;
+        if let Some(error) = parsed.error.clone() {
+            return Err(error);
+        }
+
+        let session_metadata = SessionFileMetadata {
+            session_id: Some(metadata.id),
+            timestamp: metadata.timestamp,
+            cwd: metadata.cwd,
+        };
+        let sessions =
+            group_events_by_session_with_metadata(parsed.events, path, Some(&session_metadata));
+        sessions
+            .into_iter()
+            .next()
+            .ok_or_else(|| format!("No Codex session content was found in {}.", path.display()))
     }
 }
 
@@ -40,7 +106,8 @@ impl SessionSource for CodexCliSource {
                     session_dir = parent.to_path_buf();
                 }
                 session_date = derive_codex_session_date(path).unwrap_or(session_date);
-                parse_codex_session_file(path)
+                let parsed = parse_codex_session_file_with_metadata(path);
+                (parsed.events, parsed.error)
             }
             None => (Vec::new(), None),
         };
@@ -132,6 +199,41 @@ impl SessionSource for CodexCliSource {
         }
         // Limit to 50 most recent files to avoid loading too much data
         self.find_all_files_recursively(&self.root_dir, 50)
+    }
+
+    fn load_all(&self, now: DateTime<Local>) -> MultiSessionLoad {
+        let session_dir = self.session_dir(now);
+        let (files, file_error) = self.find_all_files(&session_dir);
+
+        let mut all_sessions = Vec::new();
+        let mut aggregated_error = file_error;
+
+        for file_path in files {
+            let parsed = parse_codex_session_file_with_metadata(&file_path);
+            if let Some(err) = parsed.error {
+                append_error(&mut aggregated_error, err);
+            }
+
+            let metadata = parsed
+                .metadata
+                .as_ref()
+                .map(|metadata| SessionFileMetadata {
+                    session_id: Some(metadata.id.clone()),
+                    timestamp: metadata.timestamp.clone(),
+                    cwd: metadata.cwd.clone(),
+                });
+            let sessions =
+                group_events_by_session_with_metadata(parsed.events, &file_path, metadata.as_ref());
+            all_sessions.extend(sessions);
+        }
+
+        all_sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+        MultiSessionLoad {
+            source: self.label().to_string(),
+            sessions: all_sessions,
+            error: aggregated_error,
+        }
     }
 }
 
@@ -261,6 +363,65 @@ impl CodexCliSource {
 
         (files, entry_error)
     }
+
+    fn find_file_by_session_id_recursively(
+        &self,
+        root: &Path,
+        session_id: &str,
+    ) -> (Option<PathBuf>, Option<String>) {
+        let mut entry_error: Option<String> = None;
+        let mut stack = vec![root.to_path_buf()];
+
+        while let Some(dir) = stack.pop() {
+            match fs::read_dir(&dir) {
+                Ok(entries) => {
+                    for entry in entries {
+                        match entry {
+                            Ok(entry) => match entry.metadata() {
+                                Ok(metadata) => {
+                                    let path = entry.path();
+                                    if metadata.is_dir() {
+                                        stack.push(path);
+                                        continue;
+                                    }
+                                    if !is_codex_session_log_file(&path, &metadata) {
+                                        continue;
+                                    }
+                                    match read_codex_session_file_metadata(&path) {
+                                        Ok(Some(metadata)) if metadata.id == session_id => {
+                                            return (Some(path), entry_error);
+                                        }
+                                        Ok(_) => {}
+                                        Err(err) => append_error(&mut entry_error, err),
+                                    }
+                                }
+                                Err(err) => {
+                                    append_error(
+                                        &mut entry_error,
+                                        format!(
+                                            "{} ({}): {}",
+                                            dir.display(),
+                                            entry.file_name().to_string_lossy(),
+                                            err
+                                        ),
+                                    );
+                                }
+                            },
+                            Err(err) => {
+                                append_error(
+                                    &mut entry_error,
+                                    format!("{}: {}", dir.display(), err),
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(err) => append_error(&mut entry_error, format!("{}: {}", dir.display(), err)),
+            }
+        }
+
+        (None, entry_error)
+    }
 }
 
 fn default_session_root() -> PathBuf {
@@ -272,14 +433,26 @@ fn default_session_root() -> PathBuf {
 }
 
 pub(crate) fn parse_codex_session_file(path: &Path) -> (Vec<SessionEvent>, Option<String>) {
+    let parsed = parse_codex_session_file_with_metadata(path);
+    (parsed.events, parsed.error)
+}
+
+pub(crate) fn parse_codex_session_file_with_metadata(path: &Path) -> ParsedCodexSessionFile {
     let file = match File::open(path) {
         Ok(file) => file,
-        Err(err) => return (Vec::new(), Some(format!("{}: {}", path.display(), err))),
+        Err(err) => {
+            return ParsedCodexSessionFile {
+                metadata: None,
+                events: Vec::new(),
+                error: Some(format!("{}: {}", path.display(), err)),
+            };
+        }
     };
 
     let reader = BufReader::new(file);
     let mut events = Vec::new();
     let mut issues: Vec<String> = Vec::new();
+    let mut metadata: Option<CodexSessionFileMetadata> = None;
 
     for (idx, line) in reader.lines().enumerate() {
         match line {
@@ -287,9 +460,33 @@ pub(crate) fn parse_codex_session_file(path: &Path) -> (Vec<SessionEvent>, Optio
                 if content.trim().is_empty() {
                     continue;
                 }
-                match serde_json::from_str::<RawEvent>(&content) {
+                match serde_json::from_str::<RawEventEnvelope>(&content) {
                     Ok(raw) => {
-                        if let Some(payload) = raw.payload {
+                        if raw.event_type.as_deref() == Some("session_meta") {
+                            if let Some(payload) = raw.payload {
+                                match serde_json::from_value::<RawSessionMeta>(payload) {
+                                    Ok(session_meta) => {
+                                        metadata = Some(CodexSessionFileMetadata {
+                                            id: session_meta.id,
+                                            timestamp: session_meta.timestamp,
+                                            cwd: session_meta.cwd,
+                                        });
+                                    }
+                                    Err(err) => issues.push(format!(
+                                        "{}:#{}: failed to parse session metadata: {}",
+                                        path.display(),
+                                        idx + 1,
+                                        err
+                                    )),
+                                }
+                            }
+                            continue;
+                        }
+
+                        if let Some(payload) = raw
+                            .payload
+                            .and_then(|payload| serde_json::from_value::<RawPayload>(payload).ok())
+                        {
                             let RawPayload {
                                 payload_type,
                                 call_id,
@@ -325,10 +522,11 @@ pub(crate) fn parse_codex_session_file(path: &Path) -> (Vec<SessionEvent>, Optio
                 }
             }
             Err(err) => {
-                return (
+                return ParsedCodexSessionFile {
+                    metadata,
                     events,
-                    Some(format!("{} (line {}): {}", path.display(), idx + 1, err)),
-                );
+                    error: Some(format!("{} (line {}): {}", path.display(), idx + 1, err)),
+                };
             }
         }
     }
@@ -339,7 +537,52 @@ pub(crate) fn parse_codex_session_file(path: &Path) -> (Vec<SessionEvent>, Optio
         Some(issues.join(" | "))
     };
 
-    (events, error)
+    ParsedCodexSessionFile {
+        metadata,
+        events,
+        error,
+    }
+}
+
+fn read_codex_session_file_metadata(
+    path: &Path,
+) -> Result<Option<CodexSessionFileMetadata>, String> {
+    let file = File::open(path).map_err(|err| format!("{}: {}", path.display(), err))?;
+    let reader = BufReader::new(file);
+
+    for (idx, line) in reader.lines().enumerate() {
+        let content =
+            line.map_err(|err| format!("{} (line {}): {}", path.display(), idx + 1, err))?;
+        if content.trim().is_empty() {
+            continue;
+        }
+
+        let raw = serde_json::from_str::<RawEventEnvelope>(&content)
+            .map_err(|err| format!("{}:#{}: {}", path.display(), idx + 1, err))?;
+        if raw.event_type.as_deref() == Some("session_meta") {
+            return raw
+                .payload
+                .map(|payload| {
+                    serde_json::from_value::<RawSessionMeta>(payload)
+                        .map(|metadata| CodexSessionFileMetadata {
+                            id: metadata.id,
+                            timestamp: metadata.timestamp,
+                            cwd: metadata.cwd,
+                        })
+                        .map_err(|err| {
+                            format!(
+                                "{}:#{}: failed to parse session metadata: {}",
+                                path.display(),
+                                idx + 1,
+                                err
+                            )
+                        })
+                })
+                .transpose();
+        }
+    }
+
+    Ok(None)
 }
 
 fn is_relevant_payload_type(payload_type: &str) -> bool {
@@ -382,11 +625,11 @@ fn file_modified_date(path: &Path) -> Option<String> {
 }
 
 #[derive(Debug, Deserialize)]
-struct RawEvent {
+struct RawEventEnvelope {
     timestamp: Option<String>,
     #[serde(rename = "type")]
-    _event_type: Option<String>,
-    payload: Option<RawPayload>,
+    event_type: Option<String>,
+    payload: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -402,6 +645,13 @@ struct RawPayload {
 #[derive(Debug, Deserialize)]
 struct ContentFragment {
     text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawSessionMeta {
+    id: String,
+    timestamp: Option<String>,
+    cwd: Option<String>,
 }
 
 #[cfg(test)]
@@ -446,21 +696,66 @@ mod tests {
     }
 
     #[test]
+    fn parse_codex_fixture_extracts_session_metadata() {
+        let path = fixture_path("test_fixtures/codex_events_sample.jsonl");
+        let parsed = parse_codex_session_file_with_metadata(&path);
+
+        let metadata = parsed.metadata.expect("expected session metadata");
+        assert_eq!(metadata.id, "0199969f-2c8a-7b70-8d01-2926e17d1fd5");
+        assert_eq!(metadata.cwd.as_deref(), Some("/workspace/learnchain"));
+        assert_eq!(
+            metadata.timestamp.as_deref(),
+            Some("2025-09-29T17:57:18.091Z")
+        );
+    }
+
+    #[test]
     fn codex_session_extracts_command_summary() {
-        use crate::session_sources::group_events_by_session;
+        use crate::session_sources::{SessionFileMetadata, group_events_by_session_with_metadata};
 
         let path = fixture_path("test_fixtures/codex_events_sample.jsonl");
-        let (events, _) = parse_codex_session_file(&path);
+        let parsed = parse_codex_session_file_with_metadata(&path);
+        let metadata = parsed
+            .metadata
+            .as_ref()
+            .map(|metadata| SessionFileMetadata {
+                session_id: Some(metadata.id.clone()),
+                timestamp: metadata.timestamp.clone(),
+                cwd: metadata.cwd.clone(),
+            });
 
-        let sessions = group_events_by_session(events, &path);
+        let sessions =
+            group_events_by_session_with_metadata(parsed.events, &path, metadata.as_ref());
         assert!(!sessions.is_empty(), "expected at least one session");
 
         let session = &sessions[0];
+        assert_eq!(session.id, "0199969f-2c8a-7b70-8d01-2926e17d1fd5");
+        assert_eq!(session.cwd, "/workspace/learnchain");
         // Should extract "ls" from the command array ["bash", "-lc", "ls"]
         assert!(
             session.summary.contains("ls") || session.summary.contains("Started with"),
             "expected summary to contain command, got: {}",
             session.summary
+        );
+    }
+
+    #[test]
+    fn codex_source_loads_session_by_id() {
+        let source = CodexCliSource::with_root(
+            fixture_path("test_fixtures")
+                .parent()
+                .expect("fixture root")
+                .join("test_fixtures"),
+        );
+
+        let session = source
+            .load_session_by_id("0199969f-2c8a-7b70-8d01-2926e17d1fd5")
+            .expect("expected session");
+        assert_eq!(session.id, "0199969f-2c8a-7b70-8d01-2926e17d1fd5");
+        assert_eq!(session.cwd, "/workspace/learnchain");
+        assert_eq!(
+            session.source_file,
+            fixture_path("test_fixtures/codex_events_sample.jsonl")
         );
     }
 }

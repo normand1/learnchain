@@ -27,6 +27,44 @@ use super::types::{LearningGenerationResult, LlmUsage, StructuredLearningRespons
 
 const EXTRACTOR_RETRIES: u64 = 1;
 const LLM_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+const DEEP_DIVE_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodexReasoningEffort {
+    Low,
+}
+
+impl CodexReasoningEffort {
+    fn as_config_value(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LlmRequestOptions {
+    timeout: Duration,
+    codex_reasoning_effort: Option<CodexReasoningEffort>,
+}
+
+impl LlmRequestOptions {
+    pub(crate) fn session_deep_dive() -> Self {
+        Self {
+            timeout: DEEP_DIVE_REQUEST_TIMEOUT,
+            codex_reasoning_effort: Some(CodexReasoningEffort::Low),
+        }
+    }
+}
+
+impl Default for LlmRequestOptions {
+    fn default() -> Self {
+        Self {
+            timeout: LLM_REQUEST_TIMEOUT,
+            codex_reasoning_effort: None,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 enum RigProviderClient {
@@ -85,6 +123,10 @@ impl LlmBackend {
             model_name: resolved.model_name,
             output_root: output_root.into(),
         })
+    }
+
+    pub(crate) fn provider(&self) -> AiProvider {
+        self.provider
     }
 
     pub async fn generate_learning_response_with_progress(
@@ -168,19 +210,61 @@ impl LlmBackend {
     where
         T: DeserializeOwned + Serialize + JsonSchema + Send + Sync + 'static,
     {
+        self.extract_typed_with_options(
+            preamble,
+            prompt,
+            error_context,
+            LlmRequestOptions::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn extract_typed_with_options<T>(
+        &self,
+        preamble: &str,
+        prompt: &str,
+        error_context: &str,
+        options: LlmRequestOptions,
+    ) -> Result<(T, Option<LlmUsage>)>
+    where
+        T: DeserializeOwned + Serialize + JsonSchema + Send + Sync + 'static,
+    {
         match &self.client {
             BackendClient::Rig(RigProviderClient::OpenAi(client)) => {
-                extract_with_client(client, &self.model_name, preamble, prompt, error_context).await
+                extract_with_client(
+                    client,
+                    &self.model_name,
+                    preamble,
+                    prompt,
+                    error_context,
+                    options,
+                )
+                .await
             }
             BackendClient::Rig(RigProviderClient::Anthropic(client)) => {
-                extract_with_client(client, &self.model_name, preamble, prompt, error_context).await
+                extract_with_client(
+                    client,
+                    &self.model_name,
+                    preamble,
+                    prompt,
+                    error_context,
+                    options,
+                )
+                .await
             }
             BackendClient::Rig(RigProviderClient::OpenRouter(client)) => {
-                extract_with_openrouter(client, &self.model_name, preamble, prompt, error_context)
-                    .await
+                extract_with_openrouter(
+                    client,
+                    &self.model_name,
+                    preamble,
+                    prompt,
+                    error_context,
+                    options,
+                )
+                .await
             }
             BackendClient::CodexCli => {
-                self.extract_with_codex_cli::<T>(preamble, prompt, error_context)
+                self.extract_with_codex_cli::<T>(preamble, prompt, error_context, options)
                     .await
             }
         }
@@ -191,13 +275,14 @@ impl LlmBackend {
         preamble: &str,
         prompt: &str,
         error_context: &str,
+        options: LlmRequestOptions,
     ) -> Result<(T, Option<LlmUsage>)>
     where
         T: DeserializeOwned + Serialize + JsonSchema + Send + Sync + 'static,
     {
         let schema_path = self.write_codex_schema_file::<T>()?;
         let result = self
-            .run_codex_cli_request::<T>(&schema_path, preamble, prompt, error_context)
+            .run_codex_cli_request::<T>(&schema_path, preamble, prompt, error_context, options)
             .await;
         remove_schema_file(&schema_path);
         result
@@ -209,6 +294,7 @@ impl LlmBackend {
         preamble: &str,
         prompt: &str,
         error_context: &str,
+        options: LlmRequestOptions,
     ) -> Result<(T, Option<LlmUsage>)>
     where
         T: DeserializeOwned + Serialize + JsonSchema + Send + Sync + 'static,
@@ -230,6 +316,7 @@ impl LlmBackend {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        apply_codex_cli_overrides(&mut command, options);
 
         let mut child = command
             .spawn()
@@ -244,12 +331,12 @@ impl LlmBackend {
             .wrap_err("failed to send prompt to Codex CLI")?;
         drop(stdin);
 
-        let output = tokio::time::timeout(LLM_REQUEST_TIMEOUT, child.wait_with_output())
+        let output = tokio::time::timeout(options.timeout, child.wait_with_output())
             .await
             .map_err(|_| {
                 eyre!(
                     "Codex CLI request timed out after {} seconds while extracting {}",
-                    LLM_REQUEST_TIMEOUT.as_secs(),
+                    options.timeout.as_secs(),
                     error_context
                 )
             })?
@@ -386,6 +473,15 @@ fn build_codex_cli_prompt(preamble: &str, prompt: &str) -> String {
         preamble.trim(),
         prompt.trim()
     )
+}
+
+fn apply_codex_cli_overrides(command: &mut Command, options: LlmRequestOptions) {
+    if let Some(reasoning_effort) = options.codex_reasoning_effort {
+        command.arg("-c").arg(format!(
+            "model_reasoning_effort=\"{}\"",
+            reasoning_effort.as_config_value()
+        ));
+    }
 }
 
 fn build_codex_output_schema_json<T>() -> Result<String>
@@ -556,6 +652,7 @@ async fn extract_with_client<C, T>(
     preamble: &str,
     prompt: &str,
     error_context: &str,
+    options: LlmRequestOptions,
 ) -> Result<(T, Option<LlmUsage>)>
 where
     C: CompletionClient,
@@ -566,14 +663,14 @@ where
         .preamble(preamble)
         .build();
 
-    let response = tokio::time::timeout(LLM_REQUEST_TIMEOUT, async {
+    let response = tokio::time::timeout(options.timeout, async {
         agent.prompt_typed::<T>(prompt).extended_details().await
     })
     .await
     .map_err(|_| {
         eyre!(
             "provider request timed out after {} seconds",
-            LLM_REQUEST_TIMEOUT.as_secs()
+            options.timeout.as_secs()
         )
     })?
     .wrap_err_with(|| format!("failed to deserialize {}", error_context))?;
@@ -587,11 +684,12 @@ async fn extract_with_openrouter<T>(
     preamble: &str,
     prompt: &str,
     error_context: &str,
+    options: LlmRequestOptions,
 ) -> Result<(T, Option<LlmUsage>)>
 where
     T: DeserializeOwned + Serialize + JsonSchema + Send + Sync + 'static,
 {
-    let response = tokio::time::timeout(LLM_REQUEST_TIMEOUT, async {
+    let response = tokio::time::timeout(options.timeout, async {
         client
             .extractor::<T>(model_name.to_string())
             .preamble(preamble)
@@ -604,7 +702,7 @@ where
     .map_err(|_| {
         eyre!(
             "provider request timed out after {} seconds",
-            LLM_REQUEST_TIMEOUT.as_secs()
+            options.timeout.as_secs()
         )
     })?
     .wrap_err_with(|| format!("failed to extract {}", error_context))?;
@@ -712,6 +810,26 @@ mod tests {
         assert!(prompt.contains("Return a quiz"));
         assert!(prompt.contains("Return only JSON"));
         assert!(prompt.contains("Do not wrap the JSON in markdown fences"));
+    }
+
+    #[test]
+    fn apply_codex_cli_overrides_sets_reasoning_effort_override() {
+        let mut command = Command::new("codex");
+        command.arg("exec");
+
+        apply_codex_cli_overrides(&mut command, LlmRequestOptions::session_deep_dive());
+
+        let program = command.as_std().get_program().to_string_lossy().to_string();
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(program, "codex");
+        assert!(args.contains(&"exec".to_string()));
+        assert!(args.contains(&"-c".to_string()));
+        assert!(args.contains(&"model_reasoning_effort=\"low\"".to_string()));
     }
 
     #[test]

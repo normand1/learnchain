@@ -13,7 +13,7 @@ mod view_managers;
 use color_eyre::Result;
 use config::ConfigForm;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use document_repository::poll_export_messages;
+use document_repository::{RepositoryExportResult, poll_export_messages};
 use dotenvy::dotenv;
 use knowledge_store::KnowledgeAnalytics;
 use llm::{
@@ -23,10 +23,11 @@ use llm::{
 use output_manager::{LibraryArtifactEntry, OutputManager};
 use ratatui::{DefaultTerminal, Frame};
 use session_manager::SessionManager;
-use session_sources::{Session, SessionEvent, SessionLoad};
+use session_sources::{CodexCliSource, Session, SessionEvent, SessionLoad};
 use std::{
     collections::HashSet,
-    path::PathBuf,
+    env, fs,
+    path::{Path, PathBuf},
     sync::mpsc::{Receiver, Sender},
     time::{Duration, Instant},
 };
@@ -37,7 +38,12 @@ use view_managers::{
 };
 
 pub(crate) const AI_LOADING_FRAMES: [&str; 4] = ["-", "\\", "|", "/"];
-const HELP_TEXT: &str = "learnchain options:\n  --debug, -d               write runtime debug logs to output/learnchain-debug.log\n  --set-openai-key <key>    store your OpenAI API key\n  --clear-openai-key        remove the stored OpenAI API key\n  --set-anthropic-key <key> store your Anthropic API key\n  --clear-anthropic-key     remove the stored Anthropic API key\n  --set-openrouter-key <key> store your OpenRouter API key\n  --clear-openrouter-key    remove the stored OpenRouter API key\n  --set-document-repository <none|notion|learnchain>\n                           store the selected document repository\n  --clear-document-repository\n                           clear the selected document repository and target\n  --set-document-repository-target <target>\n                           store the document repository target\n  --clear-document-repository-target\n                           remove the stored document repository target\n  --set-notion-api-token <token>\n                           store the Notion API token for Notion exports\n  --clear-notion-api-token\n                           remove the stored Notion API token\n  --set-learnchain-site-url <url>\n                           store the LearnChain site URL (for example http://localhost:3000)\n  --clear-learnchain-site-url\n                           reset the LearnChain site URL to its default\n  --set-learnchain-email <email>\n                           store the LearnChain email used for document upload\n  --clear-learnchain-email\n                           remove the stored LearnChain email\n  --set-learnchain-password <password>\n                           store the LearnChain password used for document upload\n  --clear-learnchain-password\n                           remove the stored LearnChain password\n  --help                    show this message\n  --version                 show version";
+const CODEX_SKILL_NAME: &str = "learnchain-deep-dive";
+const EMBEDDED_CODEX_SKILL: &str =
+    include_str!("../assets/codex-skills/learnchain-deep-dive/SKILL.md");
+const EMBEDDED_CODEX_SKILL_OPENAI_YAML: &str =
+    include_str!("../assets/codex-skills/learnchain-deep-dive/agents/openai.yaml");
+const HELP_TEXT: &str = "learnchain options:\n  --debug, -d               write runtime debug logs to output/learnchain-debug.log\n  --set-openai-key <key>    store your OpenAI API key\n  --clear-openai-key        remove the stored OpenAI API key\n  --set-anthropic-key <key> store your Anthropic API key\n  --clear-anthropic-key     remove the stored Anthropic API key\n  --set-openrouter-key <key> store your OpenRouter API key\n  --clear-openrouter-key    remove the stored OpenRouter API key\n  --set-document-repository <none|notion|learnchain>\n                           store the selected document repository\n  --clear-document-repository\n                           clear the selected document repository and target\n  --set-document-repository-target <target>\n                           store the document repository target\n  --clear-document-repository-target\n                           remove the stored document repository target\n  --set-notion-api-token <token>\n                           store the Notion API token for Notion exports\n  --clear-notion-api-token\n                           remove the stored Notion API token\n  --set-learnchain-site-url <url>\n                           store the LearnChain site URL (for example http://localhost:3000)\n  --clear-learnchain-site-url\n                           reset the LearnChain site URL to its default\n  --set-learnchain-email <email>\n                           store the LearnChain email used for document upload\n  --clear-learnchain-email\n                           remove the stored LearnChain email\n  --set-learnchain-password <password>\n                           store the LearnChain password used for document upload\n  --clear-learnchain-password\n                           remove the stored LearnChain password\n  --generate-codex-deep-dive\n                           generate a deep dive for the current or specified Codex session\n  --codex-thread-id <id>\n                           target a specific Codex session id with --generate-codex-deep-dive\n  --export-to-document-repository\n                           export the generated Codex deep dive to the configured document repository\n  --print-codex-deep-dive-action\n                           print a copy/paste Codex custom command template\n  --install-codex-deep-dive-skill\n                           install the bundled LearnChain Codex skill into your Codex skills folder\n  --help                    show this message\n  --version                 show version";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CliCommand {
@@ -59,6 +65,9 @@ enum CliCommand {
     ClearLearnChainEmail,
     SetLearnChainPassword(String),
     ClearLearnChainPassword,
+    GenerateCodexDeepDive,
+    PrintCodexDeepDiveAction,
+    InstallCodexDeepDiveSkill,
     Help,
     Version,
 }
@@ -66,6 +75,8 @@ enum CliCommand {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct CliOptions {
     debug_logging: bool,
+    codex_thread_id: Option<String>,
+    export_document_repository: bool,
     command: Option<CliCommand>,
 }
 
@@ -133,6 +144,8 @@ fn main() -> color_eyre::Result<()> {
         log_util::log_debug("App: runtime debug logging enabled via CLI flag");
     }
 
+    let codex_thread_id = cli.codex_thread_id.clone();
+    let export_document_repository = cli.export_document_repository;
     if let Some(command) = cli.command {
         match command {
             CliCommand::SetOpenAiKey(key) => {
@@ -234,6 +247,28 @@ fn main() -> color_eyre::Result<()> {
                 println!("Cleared LearnChain password from config/app_config.toml.");
                 return Ok(());
             }
+            CliCommand::GenerateCodexDeepDive => {
+                if let Err(message) = run_codex_deep_dive_command(
+                    codex_thread_id.as_deref(),
+                    export_document_repository,
+                ) {
+                    eprintln!("{}", message);
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
+            CliCommand::PrintCodexDeepDiveAction => {
+                println!("{}", codex_deep_dive_action_template());
+                return Ok(());
+            }
+            CliCommand::InstallCodexDeepDiveSkill => {
+                let installed_path = install_embedded_codex_skill_default()?;
+                println!(
+                    "Installed LearnChain Codex skill to {}\nRestart Codex to pick up new skills.",
+                    installed_path.display()
+                );
+                return Ok(());
+            }
             CliCommand::Help => {
                 println!("{}", HELP_TEXT);
                 return Ok(());
@@ -254,6 +289,212 @@ fn main() -> color_eyre::Result<()> {
     let _ = crossterm::execute!(std::io::stdout(), event::DisableBracketedPaste);
     ratatui::restore();
     result
+}
+
+#[derive(Debug, Clone)]
+struct CodexSessionResolution {
+    session: Session,
+    fallback_note: Option<String>,
+}
+
+fn run_codex_deep_dive_command(
+    explicit_thread_id: Option<&str>,
+    export_document_repository: bool,
+) -> std::result::Result<(), String> {
+    config::initialize().map_err(|err| format!("Failed to load configuration: {}", err))?;
+
+    let app_config = config::current();
+    let resolved_llm = app_config.resolved_llm();
+    let provider = resolved_llm.provider;
+    let backend = LlmBackend::from_config(resolved_llm.clone(), "output").map_err(|err| {
+        if resolved_llm.api_key.trim().is_empty()
+            || (provider == config::AiProvider::OpenRouter
+                && resolved_llm.model_name.trim().is_empty())
+        {
+            provider.setup_help().to_string()
+        } else {
+            err.to_string()
+        }
+    })?;
+
+    let source = CodexCliSource::default();
+    let resolution = resolve_codex_session(&source, explicit_thread_id)?;
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|err| format!("Failed to build Tokio runtime: {}", err))?;
+    let result = runtime
+        .block_on(llm::deep_dive::generate_deep_dive_with_progress(
+            &backend,
+            "Codex CLI",
+            resolution.session,
+            app_config.deep_dive_sections.clone(),
+            None,
+        ))
+        .map_err(|err| err.to_string())?;
+
+    let export_result = if export_document_repository {
+        Some(
+            runtime
+                .block_on(document_repository::export_deep_dive_document(
+                    &app_config,
+                    &result.document,
+                ))
+                .map_err(|err| {
+                    format!(
+                        "LearnChain deep dive created at {} but export failed: {}",
+                        result.document.path.display(),
+                        err
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+
+    println!(
+        "{}",
+        format_codex_deep_dive_success(
+            &result,
+            resolution.fallback_note.as_deref(),
+            export_result.as_ref(),
+        )
+    );
+    Ok(())
+}
+
+fn resolve_codex_session(
+    source: &CodexCliSource,
+    explicit_thread_id: Option<&str>,
+) -> std::result::Result<CodexSessionResolution, String> {
+    if let Some(thread_id) = explicit_thread_id.filter(|value| !value.trim().is_empty()) {
+        let session = source.load_session_by_id(thread_id)?;
+        return Ok(CodexSessionResolution {
+            session,
+            fallback_note: None,
+        });
+    }
+
+    if let Ok(thread_id) = std::env::var("CODEX_THREAD_ID") {
+        let trimmed = thread_id.trim();
+        if !trimmed.is_empty() {
+            match source.load_session_by_id(trimmed) {
+                Ok(session) => {
+                    return Ok(CodexSessionResolution {
+                        session,
+                        fallback_note: None,
+                    });
+                }
+                Err(err) if err.contains("No Codex session file matched session id") => {
+                    let session = source.load_latest_session()?;
+                    return Ok(CodexSessionResolution {
+                        session,
+                        fallback_note: Some(format!(
+                            "Note: CODEX_THREAD_ID '{}' was not found on disk, so LearnChain used the most recent Codex session instead.",
+                            trimmed
+                        )),
+                    });
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    let session = source.load_latest_session()?;
+    Ok(CodexSessionResolution {
+        session,
+        fallback_note: None,
+    })
+}
+
+fn format_codex_deep_dive_success(
+    result: &DeepDiveGenerationResult,
+    fallback_note: Option<&str>,
+    export_result: Option<&RepositoryExportResult>,
+) -> String {
+    let mut lines = vec!["LearnChain deep dive created".to_string()];
+    lines.push(format!("Path: {}", result.document.path.display()));
+    lines.push(format!("Title: {}", result.response.title));
+    lines.push(format!("Goal: {}", result.response.goal));
+
+    for accomplishment in result.response.accomplishments.iter().take(3) {
+        lines.push(format!("- {}", accomplishment));
+    }
+
+    lines.push(format!(
+        "Reviewed URLs: {}",
+        result.document.metadata.reviewed_url_count
+    ));
+    lines.push(format!(
+        "Fetch failures: {}",
+        result.reviewed_source_failures.len()
+    ));
+
+    if let Some(export_result) = export_result {
+        lines.push(format!("Exported to: {}", export_result.repository_label));
+        if let Some(url) = export_result.remote_url.as_deref() {
+            lines.push(format!("Export URL: {}", url));
+        }
+    }
+
+    if let Some(note) = fallback_note {
+        lines.push(note.to_string());
+    }
+
+    lines.join("\n")
+}
+
+fn codex_deep_dive_action_template() -> &'static str {
+    r#"Codex custom command template
+
+Name: /learnchain-deep-dive
+Description: Generate a LearnChain deep dive for the current Codex session.
+
+Prompt:
+Run `learnchain --generate-codex-deep-dive --codex-thread-id "$CODEX_THREAD_ID"` from the workspace root.
+
+If the command succeeds, respond with:
+- the saved path
+- the deep-dive title
+- a short summary of what the deep dive covers
+
+If the command fails, surface the LearnChain error exactly as written, including any setup or configuration guidance.
+"#
+}
+
+fn install_embedded_codex_skill_default() -> color_eyre::Result<PathBuf> {
+    let root = codex_skills_root()?;
+    install_embedded_codex_skill_at(&root)
+}
+
+fn install_embedded_codex_skill_at(root: &Path) -> color_eyre::Result<PathBuf> {
+    let skill_dir = root.join(CODEX_SKILL_NAME);
+    let agents_dir = skill_dir.join("agents");
+
+    fs::create_dir_all(&agents_dir)?;
+    fs::write(skill_dir.join("SKILL.md"), EMBEDDED_CODEX_SKILL)?;
+    fs::write(
+        agents_dir.join("openai.yaml"),
+        EMBEDDED_CODEX_SKILL_OPENAI_YAML,
+    )?;
+
+    Ok(skill_dir)
+}
+
+fn codex_skills_root() -> color_eyre::Result<PathBuf> {
+    if let Some(codex_home) = env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(codex_home).join("skills"));
+    }
+
+    if let Some(home) = env::var_os("HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(home).join(".codex").join("skills"));
+    }
+
+    if let Some(user_profile) = env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(user_profile).join(".codex").join("skills"));
+    }
+
+    Err(color_eyre::eyre::eyre!(
+        "Could not determine Codex home directory. Set CODEX_HOME and retry."
+    ))
 }
 
 fn parse_cli_options(args: &[String]) -> std::result::Result<CliOptions, String> {
@@ -397,6 +638,29 @@ fn parse_cli_options(args: &[String]) -> std::result::Result<CliOptions, String>
                 set_command(&mut options.command, CliCommand::ClearLearnChainPassword)?;
                 index += 1;
             }
+            "--generate-codex-deep-dive" => {
+                set_command(&mut options.command, CliCommand::GenerateCodexDeepDive)?;
+                index += 1;
+            }
+            "--codex-thread-id" => {
+                let thread_id = args
+                    .get(index + 1)
+                    .ok_or_else(|| "Usage: learnchain --codex-thread-id <id>".to_string())?;
+                options.codex_thread_id = Some(thread_id.clone());
+                index += 2;
+            }
+            "--export-to-document-repository" => {
+                options.export_document_repository = true;
+                index += 1;
+            }
+            "--print-codex-deep-dive-action" => {
+                set_command(&mut options.command, CliCommand::PrintCodexDeepDiveAction)?;
+                index += 1;
+            }
+            "--install-codex-deep-dive-skill" => {
+                set_command(&mut options.command, CliCommand::InstallCodexDeepDiveSkill)?;
+                index += 1;
+            }
             "--help" | "-h" => {
                 set_command(&mut options.command, CliCommand::Help)?;
                 index += 1;
@@ -412,6 +676,23 @@ fn parse_cli_options(args: &[String]) -> std::result::Result<CliOptions, String>
                 ));
             }
         }
+    }
+
+    if options.codex_thread_id.is_some()
+        && options.command != Some(CliCommand::GenerateCodexDeepDive)
+    {
+        return Err(
+            "`--codex-thread-id` can only be used with `--generate-codex-deep-dive`.".to_string(),
+        );
+    }
+
+    if options.export_document_repository
+        && options.command != Some(CliCommand::GenerateCodexDeepDive)
+    {
+        return Err(
+            "`--export-to-document-repository` can only be used with `--generate-codex-deep-dive`."
+                .to_string(),
+        );
     }
 
     Ok(options)
@@ -579,6 +860,10 @@ pub(crate) struct Project {
 impl Project {
     /// Extract cwd from a session's first event content_texts.
     pub(crate) fn extract_cwd(session: &session_sources::Session) -> String {
+        if !session.cwd.trim().is_empty() && session.cwd != "Unknown" {
+            return session.cwd.clone();
+        }
+
         session
             .events
             .first()
@@ -1057,6 +1342,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
@@ -1188,5 +1474,124 @@ mod tests {
     fn parse_cli_options_supports_clearing_document_repository() {
         let options = parse_cli_options(&args(&["--clear-document-repository"])).unwrap();
         assert_eq!(options.command, Some(CliCommand::ClearDocumentRepository));
+    }
+
+    #[test]
+    fn parse_cli_options_supports_generating_codex_deep_dive() {
+        let options = parse_cli_options(&args(&["--generate-codex-deep-dive"])).unwrap();
+        assert_eq!(options.command, Some(CliCommand::GenerateCodexDeepDive));
+        assert!(options.codex_thread_id.is_none());
+    }
+
+    #[test]
+    fn parse_cli_options_supports_codex_thread_id_with_deep_dive_command() {
+        let options = parse_cli_options(&args(&[
+            "--generate-codex-deep-dive",
+            "--codex-thread-id",
+            "thread-123",
+        ]))
+        .unwrap();
+        assert_eq!(options.command, Some(CliCommand::GenerateCodexDeepDive));
+        assert_eq!(options.codex_thread_id.as_deref(), Some("thread-123"));
+    }
+
+    #[test]
+    fn parse_cli_options_supports_exporting_document_repository_with_deep_dive_command() {
+        let options = parse_cli_options(&args(&[
+            "--generate-codex-deep-dive",
+            "--export-to-document-repository",
+        ]))
+        .unwrap();
+        assert_eq!(options.command, Some(CliCommand::GenerateCodexDeepDive));
+        assert!(options.export_document_repository);
+    }
+
+    #[test]
+    fn parse_cli_options_rejects_codex_thread_id_without_deep_dive_command() {
+        let error = parse_cli_options(&args(&["--codex-thread-id", "thread-123"])).unwrap_err();
+        assert!(error.contains("--generate-codex-deep-dive"));
+    }
+
+    #[test]
+    fn parse_cli_options_rejects_export_without_deep_dive_command() {
+        let error = parse_cli_options(&args(&["--export-to-document-repository"])).unwrap_err();
+        assert!(error.contains("--generate-codex-deep-dive"));
+    }
+
+    #[test]
+    fn parse_cli_options_supports_printing_codex_action_template() {
+        let options = parse_cli_options(&args(&["--print-codex-deep-dive-action"])).unwrap();
+        assert_eq!(options.command, Some(CliCommand::PrintCodexDeepDiveAction));
+    }
+
+    #[test]
+    fn parse_cli_options_supports_installing_codex_skill() {
+        let options = parse_cli_options(&args(&["--install-codex-deep-dive-skill"])).unwrap();
+        assert_eq!(options.command, Some(CliCommand::InstallCodexDeepDiveSkill));
+    }
+
+    #[test]
+    fn codex_action_template_contains_expected_command() {
+        let template = codex_deep_dive_action_template();
+        assert!(template.contains("/learnchain-deep-dive"));
+        assert!(template.contains(
+            "learnchain --generate-codex-deep-dive --codex-thread-id \"$CODEX_THREAD_ID\""
+        ));
+    }
+
+    #[test]
+    fn codex_deep_dive_success_formatter_includes_key_fields() {
+        let result = DeepDiveGenerationResult {
+            document: DeepDiveDocument {
+                path: PathBuf::from("/tmp/deep-dive.md"),
+                ..DeepDiveDocument::default()
+            },
+            response: llm::StructuredDeepDiveResponse {
+                title: "Session Deep Dive".to_string(),
+                goal: "Ship the feature".to_string(),
+                accomplishments: vec![
+                    "Added CLI support".to_string(),
+                    "Added session lookup".to_string(),
+                ],
+                ..llm::StructuredDeepDiveResponse::default()
+            },
+            reviewed_source_failures: vec!["https://example.com".to_string()],
+            ..DeepDiveGenerationResult::default()
+        };
+
+        let export_result = RepositoryExportResult {
+            repository_label: "Notion".to_string(),
+            document_title: "Session Deep Dive".to_string(),
+            remote_url: Some("https://notion.example/doc".to_string()),
+        };
+        let formatted = format_codex_deep_dive_success(
+            &result,
+            Some("Note: fallback used."),
+            Some(&export_result),
+        );
+        assert!(formatted.contains("LearnChain deep dive created"));
+        assert!(formatted.contains("Path: /tmp/deep-dive.md"));
+        assert!(formatted.contains("Title: Session Deep Dive"));
+        assert!(formatted.contains("Goal: Ship the feature"));
+        assert!(formatted.contains("- Added CLI support"));
+        assert!(formatted.contains("Fetch failures: 1"));
+        assert!(formatted.contains("Exported to: Notion"));
+        assert!(formatted.contains("Export URL: https://notion.example/doc"));
+        assert!(formatted.contains("Note: fallback used."));
+    }
+
+    #[test]
+    fn install_embedded_codex_skill_writes_skill_files() {
+        let temp_dir = tempdir().unwrap();
+        let skill_dir = install_embedded_codex_skill_at(temp_dir.path()).unwrap();
+
+        assert_eq!(skill_dir, temp_dir.path().join(CODEX_SKILL_NAME));
+        let skill_markdown = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
+        let openai_yaml = std::fs::read_to_string(skill_dir.join("agents/openai.yaml")).unwrap();
+
+        assert!(skill_markdown.contains("name: learnchain-deep-dive"));
+        assert!(skill_markdown.contains("learnchain --generate-codex-deep-dive"));
+        assert!(openai_yaml.contains("display_name: \"LearnChain Deep Dive\""));
+        assert!(openai_yaml.contains("default_prompt:"));
     }
 }

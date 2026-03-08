@@ -1,6 +1,7 @@
 use crate::{
     App, AppView,
     config::{self, ConfigField, ConfigForm},
+    document_repository,
     log_util::log_debug,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -17,7 +18,7 @@ impl<'a> ConfigManager<'a> {
     pub(crate) fn show_config(&mut self) {
         self.app.config_form = ConfigForm::from_config(config::current());
         self.app.config_form.set_status(
-            "Config is grouped by section. Use ↑/↓ to focus a setting, ←/→ to adjust selectors, and Enter to edit text fields.",
+            "Config is grouped by section. Use ↑/↓ to focus a setting, ←/→ to adjust selectors, and Enter to edit or act on the selected field.",
         );
         self.app.view = AppView::Config;
     }
@@ -60,10 +61,10 @@ impl<'a> ConfigManager<'a> {
                         self.app.config_form.start_editing_learnchain_site_url();
                     }
                     ConfigField::LearnChainEmail => {
-                        self.app.config_form.start_editing_learnchain_email();
+                        self.app.config_form.clear_learnchain_session();
                     }
-                    ConfigField::LearnChainPassword => {
-                        self.app.config_form.start_editing_learnchain_password();
+                    ConfigField::LearnChainAuthCode => {
+                        self.app.config_form.start_editing_learnchain_auth_code();
                     }
                     ConfigField::OpenAiKey => {
                         self.app.config_form.start_editing_openai_key();
@@ -124,13 +125,9 @@ impl<'a> ConfigManager<'a> {
             for ch in sanitized.chars() {
                 self.app.config_form.push_learnchain_site_url_char(ch);
             }
-        } else if self.app.config_form.is_editing_learnchain_email() {
+        } else if self.app.config_form.is_editing_learnchain_auth_code() {
             for ch in sanitized.chars() {
-                self.app.config_form.push_learnchain_email_char(ch);
-            }
-        } else if self.app.config_form.is_editing_learnchain_password() {
-            for ch in sanitized.chars() {
-                self.app.config_form.push_learnchain_password_char(ch);
+                self.app.config_form.push_learnchain_auth_code_char(ch);
             }
         } else if self.app.config_form.is_editing_openai_key() {
             for ch in sanitized.chars() {
@@ -193,26 +190,14 @@ impl<'a> ConfigManager<'a> {
                 }
                 _ => {}
             }
-        } else if self.app.config_form.is_editing_learnchain_email() {
+        } else if self.app.config_form.is_editing_learnchain_auth_code() {
             match key.code {
-                KeyCode::Esc => self.app.config_form.cancel_learnchain_email_edit(),
-                KeyCode::Enter => self.app.config_form.apply_learnchain_email_edit(),
-                KeyCode::Backspace => self.app.config_form.backspace_learnchain_email(),
+                KeyCode::Esc => self.app.config_form.cancel_learnchain_auth_code_edit(),
+                KeyCode::Enter => self.app.config_form.apply_learnchain_auth_code_edit(),
+                KeyCode::Backspace => self.app.config_form.backspace_learnchain_auth_code(),
                 KeyCode::Char(ch) => {
                     if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                        self.app.config_form.push_learnchain_email_char(ch);
-                    }
-                }
-                _ => {}
-            }
-        } else if self.app.config_form.is_editing_learnchain_password() {
-            match key.code {
-                KeyCode::Esc => self.app.config_form.cancel_learnchain_password_edit(),
-                KeyCode::Enter => self.app.config_form.apply_learnchain_password_edit(),
-                KeyCode::Backspace => self.app.config_form.backspace_learnchain_password(),
-                KeyCode::Char(ch) => {
-                    if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                        self.app.config_form.push_learnchain_password_char(ch);
+                        self.app.config_form.push_learnchain_auth_code_char(ch);
                     }
                 }
                 _ => {}
@@ -280,13 +265,19 @@ impl<'a> ConfigManager<'a> {
         let target_min = self.app.config_form.min_quiz_questions;
         let target_sampling = self.app.config_form.sampling_percentage;
         let target_source = self.app.config_form.session_source;
+        let target_deep_dive_sections = self.app.config_form.deep_dive_sections.clone();
         let target_write = self.app.config_form.write_output_artifacts;
         let target_document_repository_kind = self.app.config_form.document_repository;
         let target_document_repository = self.app.config_form.document_repository_target.clone();
         let target_notion_api_token = self.app.config_form.notion_api_token.clone();
         let target_learnchain_site_url = self.app.config_form.learnchain_site_url.clone();
-        let target_learnchain_email = self.app.config_form.learnchain_email.clone();
-        let target_learnchain_password = self.app.config_form.learnchain_password.clone();
+        let mut target_learnchain_email = self.app.config_form.learnchain_email.clone();
+        let mut target_learnchain_access_token =
+            self.app.config_form.learnchain_access_token.clone();
+        let mut target_learnchain_refresh_token =
+            self.app.config_form.learnchain_refresh_token.clone();
+        let mut target_learnchain_password = self.app.config_form.learnchain_password.clone();
+        let target_learnchain_auth_code = self.app.config_form.learnchain_auth_code.clone();
         let target_provider = self.app.config_form.ai_provider;
         let target_openai_model = self.app.config_form.openai_model;
         let target_openai_key = self.app.config_form.openai_api_key.clone();
@@ -326,17 +317,46 @@ impl<'a> ConfigManager<'a> {
             return;
         }
 
+        if self.app.config_form.is_learnchain_selected()
+            && !target_learnchain_auth_code.trim().is_empty()
+        {
+            match document_repository::exchange_learnchain_login_code(
+                &target_learnchain_site_url,
+                &target_learnchain_auth_code,
+            ) {
+                Ok(session) => {
+                    target_learnchain_email = session.account_label;
+                    target_learnchain_access_token = session.access_token;
+                    target_learnchain_refresh_token = session.refresh_token;
+                    target_learnchain_password.clear();
+                }
+                Err(err) => {
+                    App::push_error(
+                        &mut self.app.error,
+                        format!("LearnChain authorization failed: {}", err),
+                    );
+                    self.app
+                        .config_form
+                        .set_status(format!("LearnChain authorization failed. {}", err));
+                    return;
+                }
+            }
+        }
+
         match config::update(|config| {
             config.default_max_events = target_max;
             config.min_quiz_questions = target_min;
             config.sampling_percentage = target_sampling;
             config.session_source = target_source;
+            config.deep_dive_sections = target_deep_dive_sections.clone();
             config.write_output_artifacts = target_write;
             config.document_repository = target_document_repository_kind;
             config.document_repository_target = target_document_repository.clone();
             config.notion_api_token = target_notion_api_token.clone();
             config.learnchain_site_url = target_learnchain_site_url.clone();
             config.learnchain_email = target_learnchain_email.clone();
+            config.learnchain_access_token = target_learnchain_access_token.clone();
+            config.learnchain_refresh_token = target_learnchain_refresh_token.clone();
             config.learnchain_password = target_learnchain_password.clone();
             config.ai_provider = target_provider;
             config.openai_model = target_openai_model;
@@ -352,11 +372,21 @@ impl<'a> ConfigManager<'a> {
                 let resolved_llm = self.app.config_form.resolved_llm();
 
                 let status = if self.app.config_form.is_learnchain_selected()
-                    && (self.app.config_form.learnchain_email.trim().is_empty()
-                        || self.app.config_form.learnchain_password.is_empty())
+                    && !self.app.config_form.has_learnchain_auth()
                 {
-                    config::learnchain_credentials_help_message(
+                    config::learnchain_authorization_help_message(
                         &self.app.config_form.learnchain_site_url,
+                    )
+                } else if self.app.config_form.is_learnchain_selected()
+                    && self.app.config_form.has_learnchain_session()
+                {
+                    format!(
+                        "Saved • LearnChain linked as {}",
+                        if self.app.config_form.learnchain_email.trim().is_empty() {
+                            "unknown account"
+                        } else {
+                            self.app.config_form.learnchain_email.trim()
+                        }
                     )
                 } else if resolved_llm.provider == config::AiProvider::CodexCli {
                     "Saved • Provider: Codex CLI • Model: CLI default • Uses installed codex configuration"

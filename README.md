@@ -76,6 +76,53 @@ learnchain --set-notion-api-token <token>
 learnchain --clear-notion-api-token
 ```
 
+## Codex Integration
+
+LearnChain can generate a deep dive for the active Codex session without opening the TUI.
+
+Prerequisites:
+
+- Install LearnChain and configure an LLM provider.
+- Run the command from a Codex session if you want LearnChain to resolve `CODEX_THREAD_ID` automatically.
+
+Generate a deep dive for the active Codex session:
+
+```bash
+learnchain --generate-codex-deep-dive
+```
+
+Target a specific Codex session id explicitly:
+
+```bash
+learnchain --generate-codex-deep-dive --codex-thread-id <thread-id>
+```
+
+The command writes the markdown artifact to `output/deep-dives/` and prints the saved path, title, goal, and accomplishment bullets to stdout for Codex to relay back in chat.
+
+To generate and immediately export the deep dive to the configured document repository:
+
+```bash
+learnchain --generate-codex-deep-dive --export-to-document-repository
+```
+
+That uses the same repository settings as the Library export flow and prints the repository label plus remote URL when the export succeeds.
+
+To install the real Codex skill into your local Codex skills directory:
+
+```bash
+learnchain --install-codex-deep-dive-skill
+```
+
+This writes the bundled `learnchain-deep-dive` skill into `$CODEX_HOME/skills` when `CODEX_HOME` is set, or `~/.codex/skills` otherwise. Restart Codex after installation so it reloads available skills.
+
+If you want the copy/paste custom-command template as well, print it with:
+
+```bash
+learnchain --print-codex-deep-dive-action
+```
+
+That template tells Codex to run LearnChain with `--codex-thread-id "$CODEX_THREAD_ID"` and return the saved path plus a short summary.
+
 ## Usage
 
 The main menu currently supports these core flows:
@@ -131,6 +178,18 @@ cargo run
 
 # Run with runtime debug logging
 cargo run -- --debug
+
+# Generate a deep dive for the active Codex session
+cargo run -- --generate-codex-deep-dive
+
+# Generate and export a deep dive for the active Codex session
+cargo run -- --generate-codex-deep-dive --export-to-document-repository
+
+# Install the bundled Codex skill
+cargo run -- --install-codex-deep-dive-skill
+
+# Print the Codex custom command template
+cargo run -- --print-codex-deep-dive-action
 
 # Run tests with output
 cargo test -- --nocapture

@@ -59,3 +59,5 @@ if (platform !== 'win32') {
 console.log(`✓ learnchain installed successfully for ${platform}-${arch}`);
 console.log('\nRun: npx learnchain --help');
 console.log('Tip: Run `npx learnchain --set-openai-key <your-key>` to configure your OpenAI API key.');
+console.log('Codex tip: Run `npx learnchain --install-codex-deep-dive-skill` to install the LearnChain Codex skill.');
+console.log('Codex tip: Run `npx learnchain --print-codex-deep-dive-action` to print the Codex custom command template.');

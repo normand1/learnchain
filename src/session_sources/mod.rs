@@ -52,10 +52,18 @@ pub struct Session {
     pub id: String,
     pub date: String,
     pub timestamp: String,
+    pub cwd: String,
     pub summary: String,
     pub first_user_prompt: Option<String>,
     pub source_file: PathBuf,
     pub events: Vec<SessionEvent>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionFileMetadata {
+    pub session_id: Option<String>,
+    pub timestamp: Option<String>,
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug)]
@@ -214,7 +222,19 @@ pub(crate) fn append_error(slot: &mut Option<String>, message: String) {
 }
 
 pub fn group_events_by_session(events: Vec<SessionEvent>, source_file: &Path) -> Vec<Session> {
+    group_events_by_session_with_metadata(events, source_file, None)
+}
+
+pub fn group_events_by_session_with_metadata(
+    events: Vec<SessionEvent>,
+    source_file: &Path,
+    metadata: Option<&SessionFileMetadata>,
+) -> Vec<Session> {
     let mut session_map: HashMap<String, Vec<SessionEvent>> = HashMap::new();
+    let fallback_session_id = metadata
+        .and_then(|metadata| metadata.session_id.as_deref())
+        .unwrap_or("unknown")
+        .to_string();
 
     for event in events {
         let session_id = event
@@ -222,9 +242,16 @@ pub fn group_events_by_session(events: Vec<SessionEvent>, source_file: &Path) ->
             .iter()
             .find(|s| s.starts_with("session: "))
             .map(|s| s.trim_start_matches("session: ").to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+            .unwrap_or_else(|| fallback_session_id.clone());
 
         session_map.entry(session_id).or_default().push(event);
+    }
+
+    if session_map.is_empty()
+        && let Some(metadata) = metadata
+        && metadata.session_id.is_some()
+    {
+        session_map.insert(fallback_session_id, Vec::new());
     }
 
     let mut sessions: Vec<Session> = session_map
@@ -233,6 +260,7 @@ pub fn group_events_by_session(events: Vec<SessionEvent>, source_file: &Path) ->
             let timestamp = events
                 .first()
                 .map(|e| e.timestamp.clone())
+                .or_else(|| metadata.and_then(|metadata| metadata.timestamp.clone()))
                 .unwrap_or_default();
             let date = derive_date_from_timestamp(&timestamp);
             let first_user_prompt = find_first_user_prompt(&events);
@@ -241,6 +269,9 @@ pub fn group_events_by_session(events: Vec<SessionEvent>, source_file: &Path) ->
                 id,
                 date,
                 timestamp,
+                cwd: metadata
+                    .and_then(|metadata| metadata.cwd.clone())
+                    .unwrap_or_else(|| derive_session_cwd(&events)),
                 summary,
                 first_user_prompt,
                 source_file: source_file.to_path_buf(),
@@ -286,6 +317,21 @@ fn derive_date_from_timestamp(timestamp: &str) -> String {
     } else {
         "unknown".to_string()
     }
+}
+
+fn derive_session_cwd(events: &[SessionEvent]) -> String {
+    for event in events {
+        if let Some(cwd) = event
+            .content_texts
+            .iter()
+            .find(|text| text.starts_with("cwd: "))
+            .map(|text| text.trim_start_matches("cwd: ").to_string())
+        {
+            return cwd;
+        }
+    }
+
+    "Unknown".to_string()
 }
 
 fn derive_session_summary(events: &[SessionEvent], first_user_prompt: Option<&str>) -> String {

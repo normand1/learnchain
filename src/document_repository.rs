@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 use crate::{
     App, DocumentExportMessage,
     config::{self, AppConfig, DocumentRepositoryKind},
-    llm::StructuredLearningResponse,
+    llm::{DeepDiveDocument, StructuredLearningResponse},
     log_util::log_debug,
     output_manager::{LibraryArtifactEntry, OutputManager},
 };
@@ -17,6 +17,7 @@ const NOTION_API_BASE: &str = "https://api.notion.com/v1";
 const NOTION_VERSION: &str = "2025-09-03";
 const NOTION_BLOCK_BATCH_SIZE: usize = 100;
 const NOTION_TEXT_LIMIT: usize = 1800;
+const LEARNCHAIN_CLI_EXCHANGE_PATH: &str = "/api/auth/cli/exchange";
 const LEARNCHAIN_CLI_LOGIN_PATH: &str = "/api/auth/cli/login";
 const LEARNCHAIN_CLI_REFRESH_PATH: &str = "/api/auth/cli/refresh";
 const LEARNCHAIN_DOCUMENTS_PATH: &str = "/api/documents";
@@ -71,8 +72,17 @@ struct NotionDataSourceTarget {
 struct LearnChainClient {
     client: Client,
     site_url: String,
+    access_token: String,
+    refresh_token: String,
     email: String,
     password: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LearnChainStoredSession {
+    pub(crate) account_label: String,
+    pub(crate) access_token: String,
+    pub(crate) refresh_token: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -380,6 +390,8 @@ impl NotionClient {
 impl LearnChainClient {
     fn new(config: &AppConfig) -> Result<Self, String> {
         let site_url = config.learnchain_site_url.trim().to_string();
+        let access_token = config.learnchain_access_token.clone();
+        let refresh_token = config.learnchain_refresh_token.clone();
         let email = config.learnchain_email.trim().to_string();
         let password = config.learnchain_password.clone();
 
@@ -391,6 +403,8 @@ impl LearnChainClient {
         Ok(Self {
             client,
             site_url,
+            access_token,
+            refresh_token,
             email,
             password,
         })
@@ -400,8 +414,27 @@ impl LearnChainClient {
         &self,
         document: ExportableDocument,
     ) -> Result<RepositoryExportResult, String> {
-        let session = self.login().await?;
-        self.validate_session(&session, "login")?;
+        if !self.access_token.trim().is_empty() {
+            match self
+                .upload_document(&document, self.access_token.trim())
+                .await
+            {
+                Ok(uploaded) => {
+                    return Ok(RepositoryExportResult {
+                        repository_label: "LearnChain".to_string(),
+                        document_title: document.title,
+                        remote_url: Some(format!(
+                            "{}{}/{}",
+                            self.site_url, LEARNCHAIN_DOCUMENTS_PATH, uploaded.document.id
+                        )),
+                    });
+                }
+                Err(LearnChainUploadError::Unauthorized) => {}
+                Err(LearnChainUploadError::Message(message)) => return Err(message),
+            }
+        }
+
+        let session = self.authorize().await?;
         let uploaded = match self
             .upload_document(&document, &session.session.access_token)
             .await
@@ -410,6 +443,7 @@ impl LearnChainClient {
             Err(LearnChainUploadError::Unauthorized) => {
                 let refreshed = self.refresh_session(&session.session.refresh_token).await?;
                 self.validate_session(&refreshed, "refresh")?;
+                persist_learnchain_session(&refreshed)?;
                 self.upload_document(&document, &refreshed.session.access_token)
                     .await
                     .map_err(|err| match err {
@@ -430,6 +464,44 @@ impl LearnChainClient {
                 self.site_url, LEARNCHAIN_DOCUMENTS_PATH, uploaded.document.id
             )),
         })
+    }
+
+    async fn authorize(&self) -> Result<LearnChainAuthEnvelope, String> {
+        if !self.refresh_token.trim().is_empty() {
+            match self.refresh_session(self.refresh_token.trim()).await {
+                Ok(session) => {
+                    self.validate_session(&session, "refresh")?;
+                    persist_learnchain_session(&session)?;
+                    return Ok(session);
+                }
+                Err(refresh_error)
+                    if !self.email.trim().is_empty() && !self.password.trim().is_empty() =>
+                {
+                    log_debug(&format!(
+                        "LearnChain refresh failed, falling back to password login: {}",
+                        refresh_error
+                    ));
+                }
+                Err(refresh_error) => {
+                    return Err(format!(
+                        "{} {}",
+                        refresh_error,
+                        config::learnchain_authorization_help_message(&self.site_url)
+                    ));
+                }
+            }
+        }
+
+        if self.email.trim().is_empty() || self.password.trim().is_empty() {
+            return Err(config::learnchain_authorization_help_message(
+                &self.site_url,
+            ));
+        }
+
+        let session = self.login().await?;
+        self.validate_session(&session, "login")?;
+        persist_learnchain_session(&session)?;
+        Ok(session)
     }
 
     async fn login(&self) -> Result<LearnChainAuthEnvelope, String> {
@@ -557,6 +629,91 @@ impl LearnChainClient {
     }
 }
 
+fn build_learnchain_client() -> Result<Client, String> {
+    Client::builder()
+        .user_agent(format!("learnchain/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|err| format!("failed to build LearnChain client: {}", err))
+}
+
+fn normalize_learnchain_site_url(site_url: &str) -> String {
+    site_url.trim().trim_end_matches('/').to_string()
+}
+
+fn learnchain_account_label(user: &LearnChainAuthUser) -> String {
+    user.email
+        .as_deref()
+        .or(user.username.as_deref())
+        .unwrap_or(&user.id)
+        .to_string()
+}
+
+fn persist_learnchain_session(auth: &LearnChainAuthEnvelope) -> Result<(), String> {
+    let account_label = learnchain_account_label(&auth.user);
+    config::update(|cfg| {
+        cfg.learnchain_email = account_label.clone();
+        cfg.learnchain_access_token = auth.session.access_token.clone();
+        cfg.learnchain_refresh_token = auth.session.refresh_token.clone();
+    })
+    .map(|_| ())
+    .map_err(|err| format!("failed to persist LearnChain session: {}", err))
+}
+
+pub(crate) fn exchange_learnchain_login_code(
+    site_url: &str,
+    code: &str,
+) -> Result<LearnChainStoredSession, String> {
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|err| format!("failed to build Tokio runtime: {}", err))?;
+    runtime.block_on(exchange_learnchain_login_code_async(site_url, code))
+}
+
+async fn exchange_learnchain_login_code_async(
+    site_url: &str,
+    code: &str,
+) -> Result<LearnChainStoredSession, String> {
+    let client = build_learnchain_client()?;
+    let normalized_site_url = normalize_learnchain_site_url(site_url);
+    let response = client
+        .post(format!(
+            "{}{}",
+            normalized_site_url, LEARNCHAIN_CLI_EXCHANGE_PATH
+        ))
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/json;charset=UTF-8",
+        )
+        .body(serialize_json(&json!({
+            "code": code.trim(),
+        }))?)
+        .send()
+        .await
+        .map_err(|err| format!("failed to reach LearnChain auth API: {}", err))?;
+
+    if !response.status().is_success() {
+        return Err(
+            parse_learnchain_auth_error(response, "code exchange", &normalized_site_url).await,
+        );
+    }
+
+    let body = parse_json_response(response, "LearnChain code exchange response").await?;
+    let auth: LearnChainAuthEnvelope = serde_json::from_value(body)
+        .map_err(|err| format!("failed to parse LearnChain code exchange response: {}", err))?;
+
+    if !auth.session.token_type.eq_ignore_ascii_case("bearer") {
+        return Err(format!(
+            "LearnChain code exchange returned an unsupported token type: {}",
+            auth.session.token_type
+        ));
+    }
+
+    Ok(LearnChainStoredSession {
+        account_label: learnchain_account_label(&auth.user),
+        access_token: auth.session.access_token,
+        refresh_token: auth.session.refresh_token,
+    })
+}
+
 pub(crate) fn trigger_library_export(app: &mut App, entry: LibraryArtifactEntry) {
     if app.document_export_loading {
         app.ai_status = Some("A document export is already in progress.".to_string());
@@ -602,11 +759,13 @@ pub(crate) fn trigger_library_export(app: &mut App, entry: LibraryArtifactEntry)
             return;
         }
 
-        if config_snapshot.learnchain_email.trim().is_empty()
-            || config_snapshot.learnchain_password.is_empty()
+        if config_snapshot.learnchain_access_token.trim().is_empty()
+            && config_snapshot.learnchain_refresh_token.trim().is_empty()
+            && (config_snapshot.learnchain_email.trim().is_empty()
+                || config_snapshot.learnchain_password.is_empty())
         {
             let help =
-                config::learnchain_credentials_help_message(&config_snapshot.learnchain_site_url);
+                config::learnchain_authorization_help_message(&config_snapshot.learnchain_site_url);
             App::push_error(&mut app.error, help.clone());
             app.ai_status = Some(help);
             return;
@@ -691,6 +850,20 @@ async fn export_library_artifact(
     entry: LibraryArtifactEntry,
 ) -> Result<RepositoryExportResult, String> {
     let document = load_exportable_document(&entry)?;
+    export_document_to_repository(config, document).await
+}
+
+pub(crate) async fn export_deep_dive_document(
+    config: &AppConfig,
+    document: &DeepDiveDocument,
+) -> Result<RepositoryExportResult, String> {
+    export_document_to_repository(config, exportable_deep_dive_document(document)).await
+}
+
+async fn export_document_to_repository(
+    config: &AppConfig,
+    document: ExportableDocument,
+) -> Result<RepositoryExportResult, String> {
     match config.document_repository {
         DocumentRepositoryKind::None => Err("No document repository is configured.".to_string()),
         DocumentRepositoryKind::Notion => {
@@ -709,20 +882,7 @@ fn load_exportable_document(entry: &LibraryArtifactEntry) -> Result<ExportableDo
     match entry {
         LibraryArtifactEntry::DeepDive(entry) => {
             let document = output_manager.read_deep_dive_markdown(&entry.path)?;
-            let title = if document.metadata.title.trim().is_empty() {
-                entry
-                    .path
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .unwrap_or("LearnChain Deep Dive")
-                    .to_string()
-            } else {
-                document.metadata.title
-            };
-            Ok(ExportableDocument {
-                title,
-                markdown: document.markdown,
-            })
+            Ok(exportable_deep_dive_document(&document))
         }
         LibraryArtifactEntry::Quiz(entry) => {
             let response = output_manager.read_learning_response(&entry.path)?;
@@ -731,6 +891,24 @@ fn load_exportable_document(entry: &LibraryArtifactEntry) -> Result<ExportableDo
                 markdown: render_learning_markdown(&response, &entry.session_date),
             })
         }
+    }
+}
+
+fn exportable_deep_dive_document(document: &DeepDiveDocument) -> ExportableDocument {
+    let title = if document.metadata.title.trim().is_empty() {
+        document
+            .path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("LearnChain Deep Dive")
+            .to_string()
+    } else {
+        document.metadata.title.clone()
+    };
+
+    ExportableDocument {
+        title,
+        markdown: document.markdown.clone(),
     }
 }
 

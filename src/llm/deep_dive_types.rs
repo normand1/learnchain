@@ -85,6 +85,7 @@ pub struct StructuredDeepDiveResponse {
 #[derive(Debug, Clone, Default)]
 pub struct DeepDiveGenerationResult {
     pub document: DeepDiveDocument,
+    pub response: StructuredDeepDiveResponse,
     pub usage: Option<LlmUsage>,
     pub reviewed_source_failures: Vec<String>,
 }
@@ -93,6 +94,7 @@ impl From<Usage> for DeepDiveGenerationResult {
     fn from(value: Usage) -> Self {
         Self {
             document: DeepDiveDocument::default(),
+            response: StructuredDeepDiveResponse::default(),
             usage: Some(value.into()),
             reviewed_source_failures: Vec::new(),
         }

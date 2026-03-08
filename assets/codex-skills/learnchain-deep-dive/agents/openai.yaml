@@ -1,0 +1,4 @@
+interface:
+  display_name: "LearnChain Deep Dive"
+  short_description: "Generate LearnChain session deep dives"
+  default_prompt: "Use $learnchain-deep-dive to generate a LearnChain deep dive for this Codex session."

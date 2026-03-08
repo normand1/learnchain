@@ -100,7 +100,7 @@ Recommended request body:
   "artifact_type": "deep_dive",
   "title": "Session Deep Dive - Rust Export Flow",
   "markdown": "# Session Deep Dive\n\n...",
-  "source_path": "/Users/davidnorman/learnchain/output/deep-dives/deep-dive-....md",
+  "source_path": "/workspace/learnchain/output/deep-dives/deep-dive-....md",
   "repository_kind": "notion",
   "repository_target": "https://www.notion.so/31c0f905b7ec802bb0befe7ddebe4c9b",
   "credentials": {

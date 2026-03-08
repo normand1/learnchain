@@ -28,6 +28,10 @@ pub struct AppConfig {
     #[serde(default)]
     pub learnchain_email: String,
     #[serde(default)]
+    pub learnchain_access_token: String,
+    #[serde(default)]
+    pub learnchain_refresh_token: String,
+    #[serde(default)]
     pub learnchain_password: String,
     // AI Provider selection
     #[serde(default)]
@@ -50,6 +54,55 @@ pub struct AppConfig {
     // Sampling percentage for quiz generation (1-100)
     #[serde(default = "default_sampling_percentage")]
     pub sampling_percentage: u8,
+    #[serde(default)]
+    pub deep_dive_sections: DeepDiveSectionsConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DeepDiveSectionsConfig {
+    pub session_metadata: bool,
+    pub goal: bool,
+    pub accomplishments: bool,
+    pub interesting_learnings: bool,
+    pub teaching_narrative: bool,
+    pub reviewed_external_sources: bool,
+    pub referenced_urls: bool,
+}
+
+impl DeepDiveSectionsConfig {
+    pub const fn total_count() -> usize {
+        7
+    }
+
+    pub fn enabled_count(&self) -> usize {
+        [
+            self.session_metadata,
+            self.goal,
+            self.accomplishments,
+            self.interesting_learnings,
+            self.teaching_narrative,
+            self.reviewed_external_sources,
+            self.referenced_urls,
+        ]
+        .into_iter()
+        .filter(|enabled| *enabled)
+        .count()
+    }
+}
+
+impl Default for DeepDiveSectionsConfig {
+    fn default() -> Self {
+        Self {
+            session_metadata: true,
+            goal: true,
+            accomplishments: true,
+            interesting_learnings: true,
+            teaching_narrative: true,
+            reviewed_external_sources: true,
+            referenced_urls: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +196,8 @@ impl Default for AppConfig {
             notion_api_token: String::new(),
             learnchain_site_url: default_learnchain_site_url(),
             learnchain_email: String::new(),
+            learnchain_access_token: String::new(),
+            learnchain_refresh_token: String::new(),
             learnchain_password: String::new(),
             ai_provider: AiProvider::default(),
             openai_model: default_openai_model_kind(),
@@ -152,6 +207,7 @@ impl Default for AppConfig {
             openrouter_model: String::new(),
             openrouter_api_key: String::new(),
             sampling_percentage: default_sampling_percentage(),
+            deep_dive_sections: DeepDiveSectionsConfig::default(),
         }
     }
 }
@@ -232,7 +288,7 @@ Example full bash script json:
  }
 *** End Patch
 PATCH
-'],'workdir':'/Users/davidnorman/learnchain'}
+'],'workdir':'/workspace/learnchain'}
 ```
 Example subset of what should actually be considered for learning content:
 ```
@@ -448,13 +504,20 @@ pub(crate) enum ConfigField {
     MinQuiz,
     SamplingPercentage,
     SessionSource,
+    DeepDiveSessionMetadata,
+    DeepDiveGoal,
+    DeepDiveAccomplishments,
+    DeepDiveInterestingLearnings,
+    DeepDiveTeachingNarrative,
+    DeepDiveReviewedExternalSources,
+    DeepDiveReferencedUrls,
     OutputArtifacts,
     DocumentRepository,
     DocumentRepositoryTarget,
     NotionApiToken,
     LearnChainSiteUrl,
     LearnChainEmail,
-    LearnChainPassword,
+    LearnChainAuthCode,
     AiProvider,
     OpenAiModel,
     OpenAiKey,
@@ -467,6 +530,7 @@ pub(crate) enum ConfigField {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfigSection {
     Session,
+    DeepDive,
     Export,
     Ai,
 }
@@ -475,6 +539,7 @@ impl ConfigSection {
     pub(crate) fn title(self) -> &'static str {
         match self {
             Self::Session => "Session Setup",
+            Self::DeepDive => "Deep Dive Document",
             Self::Export => "Export & Publishing",
             Self::Ai => "AI Generation",
         }
@@ -484,6 +549,9 @@ impl ConfigSection {
         match self {
             Self::Session => {
                 "Choose what session data LearnChain loads and how much context it keeps."
+            }
+            Self::DeepDive => {
+                "Toggle which sections LearnChain includes when it renders a generated deep dive."
             }
             Self::Export => "Control saved artifacts and optional document repository publishing.",
             Self::Ai => {
@@ -499,12 +567,15 @@ pub struct ConfigForm {
     pub(crate) min_quiz_questions: usize,
     pub(crate) sampling_percentage: u8,
     pub(crate) session_source: SessionSourceKind,
+    pub(crate) deep_dive_sections: DeepDiveSectionsConfig,
     pub(crate) write_output_artifacts: bool,
     pub(crate) document_repository: DocumentRepositoryKind,
     pub(crate) document_repository_target: String,
     pub(crate) notion_api_token: String,
     pub(crate) learnchain_site_url: String,
     pub(crate) learnchain_email: String,
+    pub(crate) learnchain_access_token: String,
+    pub(crate) learnchain_refresh_token: String,
     pub(crate) learnchain_password: String,
     editing_document_repository_target: bool,
     document_repository_target_buffer: String,
@@ -512,10 +583,9 @@ pub struct ConfigForm {
     notion_api_token_buffer: String,
     editing_learnchain_site_url: bool,
     learnchain_site_url_buffer: String,
-    editing_learnchain_email: bool,
-    learnchain_email_buffer: String,
-    editing_learnchain_password: bool,
-    learnchain_password_buffer: String,
+    pub(crate) learnchain_auth_code: String,
+    editing_learnchain_auth_code: bool,
+    learnchain_auth_code_buffer: String,
     // Provider selection
     pub(crate) ai_provider: AiProvider,
     // OpenAI
@@ -548,12 +618,15 @@ impl ConfigForm {
             min_quiz_questions: config.min_quiz_questions,
             sampling_percentage: config.sampling_percentage,
             session_source: config.session_source,
+            deep_dive_sections: config.deep_dive_sections,
             write_output_artifacts: config.write_output_artifacts,
             document_repository: config.document_repository,
             document_repository_target: config.document_repository_target,
             notion_api_token: config.notion_api_token,
             learnchain_site_url: config.learnchain_site_url,
             learnchain_email: config.learnchain_email,
+            learnchain_access_token: config.learnchain_access_token,
+            learnchain_refresh_token: config.learnchain_refresh_token,
             learnchain_password: config.learnchain_password,
             editing_document_repository_target: false,
             document_repository_target_buffer: String::new(),
@@ -561,10 +634,9 @@ impl ConfigForm {
             notion_api_token_buffer: String::new(),
             editing_learnchain_site_url: false,
             learnchain_site_url_buffer: String::new(),
-            editing_learnchain_email: false,
-            learnchain_email_buffer: String::new(),
-            editing_learnchain_password: false,
-            learnchain_password_buffer: String::new(),
+            learnchain_auth_code: String::new(),
+            editing_learnchain_auth_code: false,
+            learnchain_auth_code_buffer: String::new(),
             ai_provider: config.ai_provider,
             openai_model: config.openai_model,
             openai_api_key: config.openai_api_key,
@@ -626,6 +698,13 @@ impl ConfigForm {
             ConfigField::MinQuiz,
             ConfigField::SamplingPercentage,
             ConfigField::SessionSource,
+            ConfigField::DeepDiveSessionMetadata,
+            ConfigField::DeepDiveGoal,
+            ConfigField::DeepDiveAccomplishments,
+            ConfigField::DeepDiveInterestingLearnings,
+            ConfigField::DeepDiveTeachingNarrative,
+            ConfigField::DeepDiveReviewedExternalSources,
+            ConfigField::DeepDiveReferencedUrls,
             ConfigField::OutputArtifacts,
             ConfigField::DocumentRepository,
         ];
@@ -639,7 +718,7 @@ impl ConfigForm {
                 DocumentRepositoryKind::LearnChain => {
                     fields.push(ConfigField::LearnChainSiteUrl);
                     fields.push(ConfigField::LearnChainEmail);
-                    fields.push(ConfigField::LearnChainPassword);
+                    fields.push(ConfigField::LearnChainAuthCode);
                 }
                 DocumentRepositoryKind::None => {}
             }
@@ -672,13 +751,20 @@ impl ConfigForm {
             | ConfigField::MinQuiz
             | ConfigField::SamplingPercentage
             | ConfigField::SessionSource => ConfigSection::Session,
+            ConfigField::DeepDiveSessionMetadata
+            | ConfigField::DeepDiveGoal
+            | ConfigField::DeepDiveAccomplishments
+            | ConfigField::DeepDiveInterestingLearnings
+            | ConfigField::DeepDiveTeachingNarrative
+            | ConfigField::DeepDiveReviewedExternalSources
+            | ConfigField::DeepDiveReferencedUrls => ConfigSection::DeepDive,
             ConfigField::OutputArtifacts
             | ConfigField::DocumentRepository
             | ConfigField::DocumentRepositoryTarget
             | ConfigField::NotionApiToken
             | ConfigField::LearnChainSiteUrl
             | ConfigField::LearnChainEmail
-            | ConfigField::LearnChainPassword => ConfigSection::Export,
+            | ConfigField::LearnChainAuthCode => ConfigSection::Export,
             ConfigField::AiProvider
             | ConfigField::OpenAiModel
             | ConfigField::OpenAiKey
@@ -749,6 +835,39 @@ impl ConfigForm {
                 self.dirty = true;
                 self.status = None;
             }
+            ConfigField::DeepDiveSessionMetadata
+            | ConfigField::DeepDiveGoal
+            | ConfigField::DeepDiveAccomplishments
+            | ConfigField::DeepDiveInterestingLearnings
+            | ConfigField::DeepDiveTeachingNarrative
+            | ConfigField::DeepDiveReviewedExternalSources
+            | ConfigField::DeepDiveReferencedUrls => {
+                let value = match self.field {
+                    ConfigField::DeepDiveSessionMetadata => {
+                        &mut self.deep_dive_sections.session_metadata
+                    }
+                    ConfigField::DeepDiveGoal => &mut self.deep_dive_sections.goal,
+                    ConfigField::DeepDiveAccomplishments => {
+                        &mut self.deep_dive_sections.accomplishments
+                    }
+                    ConfigField::DeepDiveInterestingLearnings => {
+                        &mut self.deep_dive_sections.interesting_learnings
+                    }
+                    ConfigField::DeepDiveTeachingNarrative => {
+                        &mut self.deep_dive_sections.teaching_narrative
+                    }
+                    ConfigField::DeepDiveReviewedExternalSources => {
+                        &mut self.deep_dive_sections.reviewed_external_sources
+                    }
+                    ConfigField::DeepDiveReferencedUrls => {
+                        &mut self.deep_dive_sections.referenced_urls
+                    }
+                    _ => unreachable!(),
+                };
+                *value = !*value;
+                self.dirty = true;
+                self.status = None;
+            }
             ConfigField::DocumentRepository => {
                 let updated = if delta > 0 {
                     self.document_repository.next()
@@ -764,14 +883,9 @@ impl ConfigForm {
                     }
                     self.dirty = true;
                     self.status = match self.document_repository {
-                        DocumentRepositoryKind::LearnChain
-                            if self.learnchain_email.trim().is_empty()
-                                || self.learnchain_password.is_empty() =>
-                        {
-                            Some(learnchain_credentials_help_message(
-                                &self.learnchain_site_url,
-                            ))
-                        }
+                        DocumentRepositoryKind::LearnChain if !self.has_learnchain_auth() => Some(
+                            learnchain_authorization_help_message(&self.learnchain_site_url),
+                        ),
                         _ => None,
                     };
                     self.field = ConfigField::DocumentRepository;
@@ -785,7 +899,7 @@ impl ConfigForm {
             }
             ConfigField::LearnChainSiteUrl
             | ConfigField::LearnChainEmail
-            | ConfigField::LearnChainPassword => {
+            | ConfigField::LearnChainAuthCode => {
                 // These fields require text editing, not adjustment.
             }
             ConfigField::AiProvider => {
@@ -870,12 +984,15 @@ impl ConfigForm {
         self.min_quiz_questions = config.min_quiz_questions;
         self.sampling_percentage = config.sampling_percentage;
         self.session_source = config.session_source;
+        self.deep_dive_sections = config.deep_dive_sections;
         self.write_output_artifacts = config.write_output_artifacts;
         self.document_repository = config.document_repository;
         self.document_repository_target = config.document_repository_target;
         self.notion_api_token = config.notion_api_token;
         self.learnchain_site_url = config.learnchain_site_url;
         self.learnchain_email = config.learnchain_email;
+        self.learnchain_access_token = config.learnchain_access_token;
+        self.learnchain_refresh_token = config.learnchain_refresh_token;
         self.learnchain_password = config.learnchain_password;
         self.editing_document_repository_target = false;
         self.document_repository_target_buffer.clear();
@@ -883,10 +1000,9 @@ impl ConfigForm {
         self.notion_api_token_buffer.clear();
         self.editing_learnchain_site_url = false;
         self.learnchain_site_url_buffer.clear();
-        self.editing_learnchain_email = false;
-        self.learnchain_email_buffer.clear();
-        self.editing_learnchain_password = false;
-        self.learnchain_password_buffer.clear();
+        self.learnchain_auth_code.clear();
+        self.editing_learnchain_auth_code = false;
+        self.learnchain_auth_code_buffer.clear();
         self.ai_provider = config.ai_provider;
         self.openai_model = config.openai_model;
         self.openai_api_key = config.openai_api_key;
@@ -924,6 +1040,17 @@ impl ConfigForm {
 
     pub(crate) fn is_learnchain_selected(&self) -> bool {
         self.document_repository == DocumentRepositoryKind::LearnChain
+    }
+
+    pub(crate) fn has_learnchain_session(&self) -> bool {
+        !self.learnchain_refresh_token.trim().is_empty()
+            || !self.learnchain_access_token.trim().is_empty()
+    }
+
+    pub(crate) fn has_learnchain_auth(&self) -> bool {
+        self.has_learnchain_session()
+            || (!self.learnchain_email.trim().is_empty()
+                && !self.learnchain_password.trim().is_empty())
     }
 
     pub(crate) fn start_editing_document_repository_target(&mut self) {
@@ -1069,8 +1196,8 @@ impl ConfigForm {
             self.learnchain_site_url = new_value;
             self.dirty = true;
             self.status = Some(format!(
-                "Updated LearnChain site URL. Signup URL: {}",
-                learnchain_signup_url(&self.learnchain_site_url)
+                "Updated LearnChain site URL. Dashboard: {}",
+                learnchain_dashboard_url(&self.learnchain_site_url)
             ));
         } else {
             self.status = Some("LearnChain site URL unchanged.".to_string());
@@ -1093,95 +1220,61 @@ impl ConfigForm {
         &self.learnchain_site_url_buffer
     }
 
-    pub(crate) fn is_editing_learnchain_email(&self) -> bool {
-        self.editing_learnchain_email
+    pub(crate) fn is_editing_learnchain_auth_code(&self) -> bool {
+        self.editing_learnchain_auth_code
     }
 
-    pub(crate) fn start_editing_learnchain_email(&mut self) {
-        self.editing_learnchain_email = true;
-        self.learnchain_email_buffer = self.learnchain_email.clone();
-        self.status = Some("Editing LearnChain email (Enter to save, Esc to cancel)".to_string());
-    }
-
-    pub(crate) fn cancel_learnchain_email_edit(&mut self) {
-        self.editing_learnchain_email = false;
-        self.learnchain_email_buffer.clear();
-        self.status = Some("Cancelled LearnChain email edit.".to_string());
-    }
-
-    pub(crate) fn apply_learnchain_email_edit(&mut self) {
-        let new_value = self.learnchain_email_buffer.trim().to_string();
-        if new_value != self.learnchain_email {
-            self.learnchain_email = new_value;
-            self.dirty = true;
-            self.status = Some("Updated LearnChain email.".to_string());
-        } else {
-            self.status = Some("LearnChain email unchanged.".to_string());
-        }
-        self.editing_learnchain_email = false;
-        self.learnchain_email_buffer.clear();
-    }
-
-    pub(crate) fn backspace_learnchain_email(&mut self) {
-        self.learnchain_email_buffer.pop();
-        self.status = Some("Editing LearnChain email...".to_string());
-    }
-
-    pub(crate) fn push_learnchain_email_char(&mut self, ch: char) {
-        self.learnchain_email_buffer.push(ch);
-        self.status = Some("Editing LearnChain email...".to_string());
-    }
-
-    pub(crate) fn learnchain_email_buffer(&self) -> &str {
-        &self.learnchain_email_buffer
-    }
-
-    pub(crate) fn is_editing_learnchain_password(&self) -> bool {
-        self.editing_learnchain_password
-    }
-
-    pub(crate) fn start_editing_learnchain_password(&mut self) {
-        self.editing_learnchain_password = true;
-        self.learnchain_password_buffer = self.learnchain_password.clone();
+    pub(crate) fn start_editing_learnchain_auth_code(&mut self) {
+        self.editing_learnchain_auth_code = true;
+        self.learnchain_auth_code_buffer = self.learnchain_auth_code.clone();
         self.status =
-            Some("Editing LearnChain password (Enter to save, Esc to cancel)".to_string());
+            Some("Editing LearnChain login code (Enter to save, Esc to cancel)".to_string());
     }
 
-    pub(crate) fn cancel_learnchain_password_edit(&mut self) {
-        self.editing_learnchain_password = false;
-        self.learnchain_password_buffer.clear();
-        self.status = Some("Cancelled LearnChain password edit.".to_string());
+    pub(crate) fn cancel_learnchain_auth_code_edit(&mut self) {
+        self.editing_learnchain_auth_code = false;
+        self.learnchain_auth_code_buffer.clear();
+        self.status = Some("Cancelled LearnChain login code edit.".to_string());
     }
 
-    pub(crate) fn apply_learnchain_password_edit(&mut self) {
-        let new_value = self.learnchain_password_buffer.clone();
-        if new_value != self.learnchain_password {
-            self.learnchain_password = new_value;
+    pub(crate) fn apply_learnchain_auth_code_edit(&mut self) {
+        let new_value = self.learnchain_auth_code_buffer.trim().to_uppercase();
+        if new_value != self.learnchain_auth_code {
+            self.learnchain_auth_code = new_value;
             self.dirty = true;
-            self.status = Some("Updated LearnChain password.".to_string());
+            self.status = Some("Updated LearnChain login code.".to_string());
         } else {
-            self.status = Some("LearnChain password unchanged.".to_string());
+            self.status = Some("LearnChain login code unchanged.".to_string());
         }
-        self.editing_learnchain_password = false;
-        self.learnchain_password_buffer.clear();
+        self.editing_learnchain_auth_code = false;
+        self.learnchain_auth_code_buffer.clear();
     }
 
-    pub(crate) fn backspace_learnchain_password(&mut self) {
-        self.learnchain_password_buffer.pop();
-        self.status = Some("Editing LearnChain password...".to_string());
+    pub(crate) fn backspace_learnchain_auth_code(&mut self) {
+        self.learnchain_auth_code_buffer.pop();
+        self.status = Some("Editing LearnChain login code...".to_string());
     }
 
-    pub(crate) fn push_learnchain_password_char(&mut self, ch: char) {
-        self.learnchain_password_buffer.push(ch);
-        self.status = Some("Editing LearnChain password...".to_string());
+    pub(crate) fn push_learnchain_auth_code_char(&mut self, ch: char) {
+        self.learnchain_auth_code_buffer
+            .push(ch.to_ascii_uppercase());
+        self.status = Some("Editing LearnChain login code...".to_string());
     }
 
-    pub(crate) fn masked_learnchain_password(&self) -> String {
-        mask_password(&self.learnchain_password)
+    pub(crate) fn learnchain_auth_code_buffer(&self) -> &str {
+        &self.learnchain_auth_code_buffer
     }
 
-    pub(crate) fn masked_learnchain_password_buffer(&self) -> String {
-        mask_password(&self.learnchain_password_buffer)
+    pub(crate) fn clear_learnchain_session(&mut self) {
+        self.learnchain_email.clear();
+        self.learnchain_access_token.clear();
+        self.learnchain_refresh_token.clear();
+        self.learnchain_password.clear();
+        self.learnchain_auth_code.clear();
+        self.learnchain_auth_code_buffer.clear();
+        self.editing_learnchain_auth_code = false;
+        self.dirty = true;
+        self.status = Some("Cleared LearnChain account authorization.".to_string());
     }
 
     pub(crate) fn start_editing_openai_key(&mut self) {
@@ -1372,8 +1465,7 @@ impl ConfigForm {
         self.editing_document_repository_target
             || self.editing_notion_api_token
             || self.editing_learnchain_site_url
-            || self.editing_learnchain_email
-            || self.editing_learnchain_password
+            || self.editing_learnchain_auth_code
             || self.editing_openai_key
             || self.editing_anthropic_key
             || self.editing_openrouter_key
@@ -1403,14 +1495,6 @@ fn mask_secret(value: &str) -> String {
             .rev()
             .collect();
         format!("{}{}", "*".repeat(len.saturating_sub(4)), suffix)
-    }
-}
-
-fn mask_password(value: &str) -> String {
-    if value.is_empty() {
-        "<not set>".to_string()
-    } else {
-        "****".to_string()
     }
 }
 
@@ -1470,10 +1554,17 @@ pub(crate) fn learnchain_signup_url(site_url: &str) -> String {
     )
 }
 
-pub(crate) fn learnchain_credentials_help_message(site_url: &str) -> String {
+pub(crate) fn learnchain_dashboard_url(site_url: &str) -> String {
     format!(
-        "LearnChain upload requires an account. Sign up at {}, choose \"Create account\", then set LearnChain email and password here.",
-        learnchain_signup_url(site_url)
+        "{}/dashboard",
+        normalize_learnchain_site_url(site_url).trim_end_matches('/')
+    )
+}
+
+pub(crate) fn learnchain_authorization_help_message(site_url: &str) -> String {
+    format!(
+        "LearnChain upload requires authorization. Sign in at {}, generate a CLI login code, then paste it into LearnChain login code here.",
+        learnchain_dashboard_url(site_url)
     )
 }
 
@@ -1644,6 +1735,8 @@ mod tests {
         assert!(config.document_repository_target.is_empty());
         assert_eq!(config.learnchain_site_url, LEARNCHAIN_DEFAULT_SITE_URL);
         assert!(config.learnchain_email.is_empty());
+        assert!(config.learnchain_access_token.is_empty());
+        assert!(config.learnchain_refresh_token.is_empty());
         assert!(config.learnchain_password.is_empty());
     }
 
@@ -1697,6 +1790,13 @@ mod tests {
                 ConfigField::MinQuiz,
                 ConfigField::SamplingPercentage,
                 ConfigField::SessionSource,
+                ConfigField::DeepDiveSessionMetadata,
+                ConfigField::DeepDiveGoal,
+                ConfigField::DeepDiveAccomplishments,
+                ConfigField::DeepDiveInterestingLearnings,
+                ConfigField::DeepDiveTeachingNarrative,
+                ConfigField::DeepDiveReviewedExternalSources,
+                ConfigField::DeepDiveReferencedUrls,
                 ConfigField::OutputArtifacts,
                 ConfigField::DocumentRepository,
                 ConfigField::AiProvider,
@@ -1720,6 +1820,13 @@ mod tests {
                 ConfigField::MinQuiz,
                 ConfigField::SamplingPercentage,
                 ConfigField::SessionSource,
+                ConfigField::DeepDiveSessionMetadata,
+                ConfigField::DeepDiveGoal,
+                ConfigField::DeepDiveAccomplishments,
+                ConfigField::DeepDiveInterestingLearnings,
+                ConfigField::DeepDiveTeachingNarrative,
+                ConfigField::DeepDiveReviewedExternalSources,
+                ConfigField::DeepDiveReferencedUrls,
                 ConfigField::OutputArtifacts,
                 ConfigField::DocumentRepository,
                 ConfigField::DocumentRepositoryTarget,
@@ -1744,6 +1851,13 @@ mod tests {
                 ConfigField::MinQuiz,
                 ConfigField::SamplingPercentage,
                 ConfigField::SessionSource,
+                ConfigField::DeepDiveSessionMetadata,
+                ConfigField::DeepDiveGoal,
+                ConfigField::DeepDiveAccomplishments,
+                ConfigField::DeepDiveInterestingLearnings,
+                ConfigField::DeepDiveTeachingNarrative,
+                ConfigField::DeepDiveReviewedExternalSources,
+                ConfigField::DeepDiveReferencedUrls,
                 ConfigField::OutputArtifacts,
                 ConfigField::DocumentRepository,
                 ConfigField::AiProvider,
@@ -1764,11 +1878,18 @@ mod tests {
                 ConfigField::MinQuiz,
                 ConfigField::SamplingPercentage,
                 ConfigField::SessionSource,
+                ConfigField::DeepDiveSessionMetadata,
+                ConfigField::DeepDiveGoal,
+                ConfigField::DeepDiveAccomplishments,
+                ConfigField::DeepDiveInterestingLearnings,
+                ConfigField::DeepDiveTeachingNarrative,
+                ConfigField::DeepDiveReviewedExternalSources,
+                ConfigField::DeepDiveReferencedUrls,
                 ConfigField::OutputArtifacts,
                 ConfigField::DocumentRepository,
                 ConfigField::LearnChainSiteUrl,
                 ConfigField::LearnChainEmail,
-                ConfigField::LearnChainPassword,
+                ConfigField::LearnChainAuthCode,
                 ConfigField::AiProvider,
                 ConfigField::OpenAiModel,
                 ConfigField::OpenAiKey,
@@ -1792,6 +1913,18 @@ mod tests {
                 ConfigField::MinQuiz,
                 ConfigField::SamplingPercentage,
                 ConfigField::SessionSource,
+            ]
+        );
+        assert_eq!(
+            form.visible_fields_in_section(ConfigSection::DeepDive),
+            vec![
+                ConfigField::DeepDiveSessionMetadata,
+                ConfigField::DeepDiveGoal,
+                ConfigField::DeepDiveAccomplishments,
+                ConfigField::DeepDiveInterestingLearnings,
+                ConfigField::DeepDiveTeachingNarrative,
+                ConfigField::DeepDiveReviewedExternalSources,
+                ConfigField::DeepDiveReferencedUrls,
             ]
         );
         assert_eq!(
@@ -1821,9 +1954,25 @@ mod tests {
         assert_eq!(form.selected_section(), ConfigSection::Export);
         assert_eq!(form.selected_index_in_section(), 1);
 
+        form.field = ConfigField::DeepDiveTeachingNarrative;
+        assert_eq!(form.selected_section(), ConfigSection::DeepDive);
+        assert_eq!(form.selected_index_in_section(), 4);
+
         form.field = ConfigField::OpenAiKey;
         assert_eq!(form.selected_section(), ConfigSection::Ai);
         assert_eq!(form.selected_index_in_section(), 2);
+    }
+
+    #[test]
+    fn deep_dive_section_toggles_mark_form_dirty() {
+        let mut form = ConfigForm::from_config(AppConfig::default());
+        form.field = ConfigField::DeepDiveReviewedExternalSources;
+        assert!(form.deep_dive_sections.reviewed_external_sources);
+
+        form.adjust_current(1);
+
+        assert!(!form.deep_dive_sections.reviewed_external_sources);
+        assert!(form.dirty);
     }
 
     #[test]
@@ -1920,6 +2069,15 @@ sampling_percentage = 10
     }
 
     #[test]
+    fn deep_dive_sections_default_to_all_enabled() {
+        let config = AppConfig::default();
+        assert_eq!(
+            config.deep_dive_sections.enabled_count(),
+            DeepDiveSectionsConfig::total_count()
+        );
+    }
+
+    #[test]
     fn notion_api_token_edit_marks_form_dirty_only_on_change() {
         let mut form = ConfigForm::from_config(AppConfig::default());
         form.start_editing_notion_api_token();
@@ -1961,7 +2119,13 @@ sampling_percentage = 10
         assert!(config.notion_api_token.is_empty());
         assert_eq!(config.learnchain_site_url, LEARNCHAIN_DEFAULT_SITE_URL);
         assert!(config.learnchain_email.is_empty());
+        assert!(config.learnchain_access_token.is_empty());
+        assert!(config.learnchain_refresh_token.is_empty());
         assert!(config.learnchain_password.is_empty());
+        assert_eq!(
+            config.deep_dive_sections.enabled_count(),
+            DeepDiveSectionsConfig::total_count()
+        );
     }
 
     #[test]
