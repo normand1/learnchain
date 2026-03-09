@@ -67,24 +67,36 @@ jobs:
           echo "Detected package version: $VERSION"
 
       - name: Check npm for existing version
+        id: version_check
         run: |
           if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "Version $PACKAGE_VERSION already published to npm."
-            echo "Skip publishing — create a new release/tag with a higher semver to publish again." >&2
-            exit 0
+            echo "Skipping publish — create a new release/tag with a higher semver to publish again."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Generate launcher script
+        if: steps.version_check.outputs.exists != 'true'
         run: node scripts/generate-launcher.js
 
       - name: Verify package contents
+        if: steps.version_check.outputs.exists != 'true'
         run: |
           echo "Preparing npm package: ${PACKAGE_NAME}"
           npm pack --dry-run
           echo "Package size:"
           du -sh .
 
+      - name: Verify npm auth
+        if: steps.version_check.outputs.exists != 'true'
+        run: npm whoami
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Publish to npm
+        if: steps.version_check.outputs.exists != 'true'
         run: |
           echo "Publishing ${PACKAGE_NAME} to npm"
           npm publish --access public
