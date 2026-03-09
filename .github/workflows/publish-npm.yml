@@ -57,8 +57,15 @@ jobs:
             echo "Unable to derive version from tag: $RELEASE_TAG" >&2
             exit 1
           fi
-          echo "Using package version $VERSION"
-          npm version "$VERSION" --no-git-tag-version
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          echo "Release tag version: $VERSION"
+          echo "Current package version: $CURRENT_VERSION"
+          if [ "$CURRENT_VERSION" = "$VERSION" ]; then
+            echo "package.json already matches the release tag; skipping npm version."
+          else
+            echo "Updating package.json to $VERSION"
+            npm version "$VERSION" --no-git-tag-version
+          fi
 
       - name: Capture package version
         run: |
