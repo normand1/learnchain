@@ -1,4 +1,5 @@
 use crate::{
+    llm::types::KnowledgeResponse,
     llm::{
         DeepDiveArtifactMetadata, DeepDiveDocument, DeepDiveHistoryEntry,
         StructuredLearningResponse,
@@ -222,12 +223,7 @@ impl OutputManager {
             sanitize_filename(&metadata.session_id)
         );
         let path = dir.join(filename);
-        let contents = format!(
-            "+++\n{}+++\n\n{}",
-            toml::to_string(metadata)
-                .map_err(|err| format!("failed to serialize deep-dive metadata: {}", err))?,
-            markdown
-        );
+        let contents = render_deep_dive_contents(metadata, markdown)?;
 
         fs::write(&path, contents)
             .map_err(|err| format!("failed to write deep dive to {}: {}", path.display(), err))?;
@@ -372,6 +368,110 @@ impl OutputManager {
             )
         })
     }
+}
+
+pub fn render_deep_dive_contents(
+    metadata: &DeepDiveArtifactMetadata,
+    markdown: &str,
+) -> Result<String, String> {
+    Ok(format!(
+        "+++\n{}+++\n\n{}",
+        toml::to_string(metadata)
+            .map_err(|err| format!("failed to serialize deep-dive metadata: {}", err))?,
+        markdown
+    ))
+}
+
+pub(crate) fn render_learning_markdown(
+    response: &StructuredLearningResponse,
+    session_date: &str,
+) -> String {
+    let mut markdown = String::new();
+    let title = if session_date.trim().is_empty() {
+        "LearnChain Quiz".to_string()
+    } else {
+        format!("LearnChain Quiz - {}", session_date)
+    };
+    markdown.push_str("# ");
+    markdown.push_str(&title);
+    markdown.push_str("\n\n");
+
+    let groups_markdown = render_quiz_groups_markdown(&response.response, 2);
+    if !groups_markdown.is_empty() {
+        markdown.push_str(&groups_markdown);
+    }
+
+    markdown.trim_end().to_string()
+}
+
+pub(crate) fn render_quiz_groups_markdown(
+    groups: &[KnowledgeResponse],
+    group_heading_level: usize,
+) -> String {
+    let mut markdown = String::new();
+    let group_heading_level = group_heading_level.clamp(1, 6);
+    let question_heading_level = (group_heading_level + 1).min(6);
+
+    for (group_index, group) in groups.iter().enumerate() {
+        let heading = if group.knowledge_type_group.trim().is_empty() {
+            format!("Knowledge Group {}", group_index + 1)
+        } else {
+            group.knowledge_type_group.clone()
+        };
+        push_markdown_heading(&mut markdown, group_heading_level, &heading);
+
+        if !group.knowledge_type_language.trim().is_empty() {
+            markdown.push_str("- Language: ");
+            markdown.push_str(group.knowledge_type_language.trim());
+            markdown.push('\n');
+        }
+        if !group.summary.trim().is_empty() {
+            markdown.push('\n');
+            markdown.push_str(group.summary.trim());
+            markdown.push_str("\n\n");
+        } else {
+            markdown.push('\n');
+        }
+
+        for (quiz_index, quiz) in group.quiz.iter().enumerate() {
+            push_markdown_heading(
+                &mut markdown,
+                question_heading_level,
+                &format!("Question {}", quiz_index + 1),
+            );
+            markdown.push_str(quiz.question.trim());
+            markdown.push_str("\n\n");
+
+            for option in &quiz.options {
+                markdown.push_str("- ");
+                markdown.push_str(option.selection.trim());
+                if option.is_correct_answer {
+                    markdown.push_str(" (correct)");
+                }
+                markdown.push('\n');
+            }
+
+            if !quiz.resources.is_empty() {
+                markdown.push_str("\nResources:\n");
+                for resource in &quiz.resources {
+                    markdown.push_str("- ");
+                    markdown.push_str(resource.trim());
+                    markdown.push('\n');
+                }
+            }
+
+            markdown.push('\n');
+        }
+    }
+
+    markdown.trim_end().to_string()
+}
+
+fn push_markdown_heading(markdown: &mut String, level: usize, title: &str) {
+    markdown.push_str(&"#".repeat(level.clamp(1, 6)));
+    markdown.push(' ');
+    markdown.push_str(title);
+    markdown.push('\n');
 }
 
 fn parse_deep_dive_contents(
@@ -546,6 +646,8 @@ mod tests {
                     kind: AdjustmentKind::PostFailurePivot,
                     from_tool_name: "shell".to_string(),
                     to_tool_name: "web.search_query".to_string(),
+                    from_argument_summary: Some("cmd=cat missing.txt".to_string()),
+                    to_argument_summary: Some("rust iterators".to_string()),
                 }],
             },
         };

@@ -551,7 +551,7 @@ impl ConfigSection {
                 "Choose what session data LearnChain loads and how much context it keeps."
             }
             Self::DeepDive => {
-                "Toggle which sections LearnChain includes when it renders a generated deep dive."
+                "Toggle the optional sections LearnChain includes when it renders a generated deep dive. The embedded quiz is always included."
             }
             Self::Export => "Control saved artifacts and optional document repository publishing.",
             Self::Ai => {

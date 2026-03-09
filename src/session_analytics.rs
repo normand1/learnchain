@@ -51,6 +51,8 @@ pub struct AdjustmentMarker {
     pub kind: AdjustmentKind,
     pub from_tool_name: String,
     pub to_tool_name: String,
+    pub from_argument_summary: Option<String>,
+    pub to_argument_summary: Option<String>,
 }
 
 impl Default for ExternalResourceRef {
@@ -70,6 +72,8 @@ impl Default for AdjustmentMarker {
             kind: AdjustmentKind::PostFailurePivot,
             from_tool_name: String::new(),
             to_tool_name: String::new(),
+            from_argument_summary: None,
+            to_argument_summary: None,
         }
     }
 }
@@ -93,6 +97,7 @@ struct ToolCallRecord<'a> {
     tool_name: &'a str,
     call_id: Option<&'a str>,
     normalized_arguments: Option<String>,
+    argument_summary: Option<String>,
 }
 
 pub fn analyze(session: &Session) -> SessionAnalytics {
@@ -130,6 +135,10 @@ pub fn analyze(session: &Session) -> SessionAnalytics {
                 tool_name: event.tool_name.as_deref().unwrap_or(&event.payload_type),
                 call_id: event.call_id.as_deref(),
                 normalized_arguments: normalize_arguments(event.arguments.as_deref()),
+                argument_summary: summarize_tool_context(
+                    event.tool_name.as_deref().unwrap_or(&event.payload_type),
+                    event.arguments.as_deref(),
+                ),
             };
             let index = tool_calls.len();
             if let Some(call_id) = record.call_id {
@@ -183,6 +192,11 @@ pub fn analyze(session: &Session) -> SessionAnalytics {
                 kind: AdjustmentKind::PostFailurePivot,
                 from_tool_name: source_call.tool_name.to_string(),
                 to_tool_name: next_tool_name.to_string(),
+                from_argument_summary: source_call.argument_summary.clone(),
+                to_argument_summary: summarize_tool_context(
+                    next_tool_name,
+                    next_call.arguments.as_deref(),
+                ),
             });
             continue;
         }
@@ -193,6 +207,11 @@ pub fn analyze(session: &Session) -> SessionAnalytics {
                 kind: AdjustmentKind::RetryWithDifferentArguments,
                 from_tool_name: source_call.tool_name.to_string(),
                 to_tool_name: next_tool_name.to_string(),
+                from_argument_summary: source_call.argument_summary.clone(),
+                to_argument_summary: summarize_tool_context(
+                    next_tool_name,
+                    next_call.arguments.as_deref(),
+                ),
             });
         }
     }
@@ -238,6 +257,35 @@ fn is_problematic_result(event: &SessionEvent) -> bool {
 
 fn is_external_lookup_tool(tool_name: &str) -> bool {
     tool_name.starts_with("web.") || tool_name.starts_with("mcp__")
+}
+
+pub(crate) fn describe_adjustment(adjustment: &AdjustmentMarker) -> String {
+    let description = match adjustment.kind {
+        AdjustmentKind::PostFailurePivot => "pivot after failure",
+        AdjustmentKind::RetryWithDifferentArguments => "changed args after failure",
+    };
+    let mut line = format!(
+        "{} -> {} ({})",
+        adjustment.from_tool_name, adjustment.to_tool_name, description
+    );
+
+    match (
+        adjustment.from_argument_summary.as_deref(),
+        adjustment.to_argument_summary.as_deref(),
+    ) {
+        (Some(from), Some(to)) => {
+            line.push_str(&format!(": {} -> {}", from, to));
+        }
+        (Some(from), None) => {
+            line.push_str(&format!(": {}", from));
+        }
+        (None, Some(to)) => {
+            line.push_str(&format!(": {}", to));
+        }
+        (None, None) => {}
+    }
+
+    line
 }
 
 fn external_resource_label(tool_name: &str, arguments: Option<&str>) -> String {
@@ -306,6 +354,111 @@ fn compact_argument_summary(arguments: &str) -> String {
     }
 
     compact_text(&canonical_json(&value))
+}
+
+fn summarize_tool_context(tool_name: &str, arguments: Option<&str>) -> Option<String> {
+    let arguments = arguments?;
+    let parsed = parse_json_value(arguments);
+
+    let summary = match tool_name {
+        "exec_command" | "shell" => parsed
+            .as_ref()
+            .and_then(exec_command_summary)
+            .unwrap_or_else(|| compact_text(arguments)),
+        "write_stdin" => parsed
+            .as_ref()
+            .and_then(write_stdin_summary)
+            .unwrap_or_else(|| compact_text(arguments)),
+        "request_user_input" => parsed
+            .as_ref()
+            .and_then(request_user_input_summary)
+            .unwrap_or_else(|| compact_text(arguments)),
+        _ if is_external_lookup_tool(tool_name) => {
+            external_resource_label(tool_name, Some(arguments))
+        }
+        _ => compact_argument_summary(arguments),
+    };
+
+    if summary.trim().is_empty() {
+        None
+    } else {
+        Some(summary)
+    }
+}
+
+fn exec_command_summary(value: &Value) -> Option<String> {
+    let map = value.as_object()?;
+    let command = map
+        .get("cmd")
+        .map(command_value_summary)
+        .or_else(|| map.get("command").map(command_value_summary))
+        .filter(|summary| !summary.is_empty())?;
+
+    let mut parts = vec![format!("cmd={command}")];
+    if let Some(workdir) = map.get("workdir").and_then(|value| value.as_str()) {
+        let workdir = compact_text(workdir);
+        if !workdir.is_empty() {
+            parts.push(format!("workdir={workdir}"));
+        }
+    }
+    Some(parts.join(" | "))
+}
+
+fn command_value_summary(value: &Value) -> String {
+    match value {
+        Value::Array(items) => compact_text(
+            &items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        Value::String(text) => compact_text(text),
+        other => compact_text(&canonical_json(other)),
+    }
+}
+
+fn write_stdin_summary(value: &Value) -> Option<String> {
+    let map = value.as_object()?;
+    let session_id = map
+        .get("session_id")
+        .and_then(|value| value.as_i64())
+        .map(|value| value.to_string())
+        .or_else(|| {
+            map.get("session_id")
+                .and_then(|value| value.as_str())
+                .map(ToString::to_string)
+        })?;
+    let chars = map
+        .get("chars")
+        .and_then(|value| value.as_str())
+        .map(compact_text)
+        .filter(|value| !value.is_empty());
+
+    Some(match chars {
+        Some(chars) => format!("session_id={session_id} | chars={chars}"),
+        None => format!("session_id={session_id} | poll"),
+    })
+}
+
+fn request_user_input_summary(value: &Value) -> Option<String> {
+    let map = value.as_object()?;
+    let questions = map.get("questions")?.as_array()?;
+    let headers = questions
+        .iter()
+        .filter_map(|question| question.as_object())
+        .filter_map(|question| question.get("header").and_then(|value| value.as_str()))
+        .collect::<Vec<_>>();
+
+    if headers.is_empty() {
+        Some(format!("questions={}", questions.len()))
+    } else {
+        Some(format!(
+            "questions={} ({})",
+            questions.len(),
+            compact_text(&headers.join(", "))
+        ))
+    }
 }
 
 fn normalize_arguments(arguments: Option<&str>) -> Option<String> {
@@ -609,9 +762,19 @@ mod tests {
     #[test]
     fn changed_shell_args_after_failure_counts_as_adjustment() {
         let session = session_with_events(vec![
-            tool_call("1", "call-1", "shell", Some(r#"{"command":"ls missing"}"#)),
+            tool_call(
+                "1",
+                "call-1",
+                "exec_command",
+                Some(r#"{"cmd":"ls missing","workdir":"/workspace"}"#),
+            ),
             tool_result("2", "call-1", Some(1), Some("no file")),
-            tool_call("3", "call-2", "shell", Some(r#"{"command":"ls src"}"#)),
+            tool_call(
+                "3",
+                "call-2",
+                "exec_command",
+                Some(r#"{"cmd":"ls src","workdir":"/workspace"}"#),
+            ),
         ]);
 
         assert_eq!(session.analytics.adjust_course_count, 1);
@@ -619,12 +782,29 @@ mod tests {
             session.analytics.adjustments[0].kind,
             AdjustmentKind::RetryWithDifferentArguments
         );
+        assert_eq!(
+            session.analytics.adjustments[0]
+                .from_argument_summary
+                .as_deref(),
+            Some("cmd=ls missing | workdir=/workspace")
+        );
+        assert_eq!(
+            session.analytics.adjustments[0]
+                .to_argument_summary
+                .as_deref(),
+            Some("cmd=ls src | workdir=/workspace")
+        );
     }
 
     #[test]
     fn pivot_after_failure_counts_as_adjustment() {
         let session = session_with_events(vec![
-            tool_call("1", "call-1", "shell", Some(r#"{"command":"cat missing"}"#)),
+            tool_call(
+                "1",
+                "call-1",
+                "exec_command",
+                Some(r#"{"cmd":"cat missing","workdir":"/workspace"}"#),
+            ),
             tool_result("2", "call-1", Some(1), Some("missing")),
             tool_call(
                 "3",
@@ -638,6 +818,16 @@ mod tests {
         assert_eq!(
             session.analytics.adjustments[0].kind,
             AdjustmentKind::PostFailurePivot
+        );
+        assert_eq!(
+            session.analytics.adjustments[0]
+                .to_argument_summary
+                .as_deref(),
+            Some("rust cat file")
+        );
+        assert_eq!(
+            describe_adjustment(&session.analytics.adjustments[0]),
+            "exec_command -> web.search_query (pivot after failure): cmd=cat missing | workdir=/workspace -> rust cat file"
         );
     }
 

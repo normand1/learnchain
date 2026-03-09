@@ -1,7 +1,4 @@
-use crate::{
-    config,
-    session_sources::{SessionEvent, SessionEventKind},
-};
+use crate::{config, session_sources::SessionEvent};
 
 const EXECUTION_ERROR_PREFIX: &str = "execution error:";
 const OPERATION_NOT_PERMITTED_PHRASE: &str = "operation not permitted";
@@ -160,6 +157,7 @@ fn starts_with_execution_error(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_sources::SessionEventKind;
 
     #[test]
     fn selects_most_recent_events_up_to_max() {

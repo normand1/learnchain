@@ -328,6 +328,7 @@ fn run_codex_deep_dive_command(
             "Codex CLI",
             resolution.session,
             app_config.deep_dive_sections.clone(),
+            app_config.min_quiz_questions,
             None,
         ))
         .map_err(|err| err.to_string())?;
@@ -419,6 +420,13 @@ fn format_codex_deep_dive_success(
     for accomplishment in result.response.accomplishments.iter().take(3) {
         lines.push(format!("- {}", accomplishment));
     }
+    let quiz_question_count: usize = result
+        .response
+        .quiz_groups
+        .iter()
+        .map(|group| group.quiz.len())
+        .sum();
+    lines.push(format!("Quiz questions: {}", quiz_question_count));
 
     lines.push(format!(
         "Reviewed URLs: {}",
@@ -1554,6 +1562,25 @@ mod tests {
                     "Added CLI support".to_string(),
                     "Added session lookup".to_string(),
                 ],
+                quiz_groups: vec![crate::llm::types::KnowledgeResponse {
+                    knowledge_type_group: "Codex CLI".to_string(),
+                    summary: "CLI generation now includes the quiz.".to_string(),
+                    quiz: vec![crate::llm::types::QuizItem {
+                        question: "What does the deep dive now embed?".to_string(),
+                        options: vec![
+                            crate::llm::types::QuizOption {
+                                selection: "A quiz".to_string(),
+                                is_correct_answer: true,
+                            },
+                            crate::llm::types::QuizOption {
+                                selection: "A git patch".to_string(),
+                                is_correct_answer: false,
+                            },
+                        ],
+                        resources: Vec::new(),
+                    }],
+                    knowledge_type_language: "Rust".to_string(),
+                }],
                 ..llm::StructuredDeepDiveResponse::default()
             },
             reviewed_source_failures: vec!["https://example.com".to_string()],
@@ -1575,6 +1602,7 @@ mod tests {
         assert!(formatted.contains("Title: Session Deep Dive"));
         assert!(formatted.contains("Goal: Ship the feature"));
         assert!(formatted.contains("- Added CLI support"));
+        assert!(formatted.contains("Quiz questions: 1"));
         assert!(formatted.contains("Fetch failures: 1"));
         assert!(formatted.contains("Exported to: Notion"));
         assert!(formatted.contains("Export URL: https://notion.example/doc"));
@@ -1592,6 +1620,7 @@ mod tests {
 
         assert!(skill_markdown.contains("name: learnchain-deep-dive"));
         assert!(skill_markdown.contains("learnchain --generate-codex-deep-dive"));
+        assert!(skill_markdown.contains("/dashboard/documents/<id>"));
         assert!(openai_yaml.contains("display_name: \"LearnChain Deep Dive\""));
         assert!(openai_yaml.contains("default_prompt:"));
     }

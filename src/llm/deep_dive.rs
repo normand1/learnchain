@@ -19,7 +19,7 @@ use crate::{
         DeepDiveReviewedSource, LlmBackend, StructuredDeepDiveResponse,
     },
     markdown_rules::MarkdownRules,
-    output_manager::OutputManager,
+    output_manager::{OutputManager, render_quiz_groups_markdown},
     session_sources::{Session, SessionEvent},
 };
 
@@ -73,6 +73,7 @@ pub(crate) async fn generate_deep_dive_with_progress(
     session_source: &str,
     session: Session,
     sections: DeepDiveSectionsConfig,
+    min_quiz_questions: usize,
     progress_sender: impl Into<Option<&Sender<AiTaskMessage>>>,
 ) -> Result<DeepDiveGenerationResult> {
     let sender = progress_sender.into();
@@ -134,8 +135,13 @@ pub(crate) async fn generate_deep_dive_with_progress(
         send_progress(sender, "Composing deep dive...", 80);
     }
 
-    let final_prompt =
-        build_final_deep_dive_prompt(&bundle, &plan, &fetched_sources, &fetch_failures);
+    let final_prompt = build_final_deep_dive_prompt(
+        &bundle,
+        &plan,
+        &fetched_sources,
+        &fetch_failures,
+        min_quiz_questions,
+    );
     let (mut response, final_usage) = backend
         .extract_typed_with_options::<StructuredDeepDiveResponse>(
             deep_dive_final_preamble(),
@@ -145,6 +151,8 @@ pub(crate) async fn generate_deep_dive_with_progress(
         )
         .await?;
 
+    response.teaching_narrative =
+        normalize_teaching_narrative(response.teaching_narrative, &plan.teaching_angles);
     response.title = if response.title.trim().is_empty() {
         format!("Session Deep Dive - {}", bundle.session.date)
     } else {
@@ -316,17 +324,9 @@ pub(crate) fn render_deep_dive_markdown(
             markdown.push("- None".to_string());
         } else {
             for adjustment in &metadata.session_analytics.adjustments {
-                let description = match adjustment.kind {
-                    crate::session_analytics::AdjustmentKind::PostFailurePivot => {
-                        "pivot after failure"
-                    }
-                    crate::session_analytics::AdjustmentKind::RetryWithDifferentArguments => {
-                        "changed args after failure"
-                    }
-                };
                 markdown.push(format!(
-                    "- {} -> {} ({})",
-                    adjustment.from_tool_name, adjustment.to_tool_name, description
+                    "- {}",
+                    crate::session_analytics::describe_adjustment(adjustment)
                 ));
             }
         }
@@ -349,13 +349,22 @@ pub(crate) fn render_deep_dive_markdown(
     }
     if sections.teaching_narrative {
         markdown.push("## Teaching Narrative".to_string());
+        markdown.push(String::new());
         if response.teaching_narrative.is_empty() {
             markdown.push("No teaching narrative was provided.".to_string());
         } else {
-            markdown.extend(response.teaching_narrative.iter().cloned());
+            push_markdown_blocks(&mut markdown, &response.teaching_narrative);
         }
         markdown.push(String::new());
     }
+    markdown.push("## Quiz".to_string());
+    markdown.push(String::new());
+    if response.quiz_groups.is_empty() {
+        markdown.push("No quiz questions were generated.".to_string());
+    } else {
+        markdown.push(render_quiz_groups_markdown(&response.quiz_groups, 3));
+    }
+    markdown.push(String::new());
     if sections.reviewed_external_sources {
         markdown.push("## Reviewed External Sources".to_string());
         if response.reviewed_sources.is_empty() {
@@ -432,6 +441,7 @@ fn build_final_deep_dive_prompt(
     plan: &DeepDiveResearchPlan,
     fetched_sources: &[FetchedSource],
     fetch_failures: &[String],
+    min_quiz_questions: usize,
 ) -> String {
     let accomplishments = if plan.candidate_accomplishments.is_empty() {
         "None provided.".to_string()
@@ -486,7 +496,8 @@ fn build_final_deep_dive_prompt(
     };
 
     format!(
-        "Write the final structured session deep dive.\n\nInferred goal: {}\nCandidate accomplishments:\n{}\n\nCandidate interesting learnings:\n{}\n\nTeaching angles:\n{}\n\nSession URL inventory:\n{}\n\nFetched source digests:\n{}\n\nFetch failures:\n{}\n",
+        "Write the final structured session deep dive.\n\nFormat requirements:\n- Keep the goal concise and specific.\n- Keep accomplishments and learnings scannable.\n- For teaching_narrative, do not return one large wall of text.\n- Structure teaching_narrative as markdown-friendly blocks with 3 to 5 short sections.\n- Prefer using a `###` subheading followed by a short paragraph for each section.\n- If needed, use an empty string item between sections to preserve spacing.\n- Populate quiz_groups using the same grouped quiz structure LearnChain uses for standalone quizzes.\n- Return at least {} quiz questions overall across quiz_groups.\n- Quiz questions should focus on the code, libraries, frameworks, tools, or APIs from the session rather than LearnChain's own implementation details.\n- Each quiz question should include answer options, exactly one correct answer, and any relevant supporting resources.\n\nInferred goal: {}\nCandidate accomplishments:\n{}\n\nCandidate interesting learnings:\n{}\n\nTeaching angles:\n{}\n\nSession URL inventory:\n{}\n\nFetched source digests:\n{}\n\nFetch failures:\n{}\n",
+        min_quiz_questions,
         plan.inferred_goal,
         accomplishments,
         learnings,
@@ -506,7 +517,7 @@ fn deep_dive_plan_preamble() -> &'static str {
 }
 
 fn deep_dive_final_preamble() -> &'static str {
-    "You are writing a precise, educational deep dive for a coding session. Base your answer on the provided session digest and fetched source notes. Explain what the user would have learned by implementing the feature themselves. Only reference URLs from the provided session inventory."
+    "You are writing a precise, educational deep dive for a coding session. Base your answer on the provided session digest and fetched source notes. Explain what the user would have learned by implementing the feature themselves. The teaching narrative must be easy to read, with short paragraphs and markdown subheadings when appropriate. Include embedded quiz_groups that follow the same structure as LearnChain's standalone quiz flow. Only reference URLs from the provided session inventory."
 }
 
 fn format_event_for_research_plan(event: &SessionEvent) -> String {
@@ -886,11 +897,137 @@ fn push_bullets(markdown: &mut Vec<String>, items: &[String]) {
     }
 }
 
+fn push_markdown_blocks(markdown: &mut Vec<String>, blocks: &[String]) {
+    let mut needs_separator = false;
+    for block in blocks {
+        let trimmed = block.trim();
+        if trimmed.is_empty() {
+            if !markdown.last().is_some_and(|line| line.is_empty()) {
+                markdown.push(String::new());
+            }
+            needs_separator = false;
+            continue;
+        }
+
+        if needs_separator && !markdown.last().is_some_and(|line| line.is_empty()) {
+            markdown.push(String::new());
+        }
+        markdown.push(trimmed.to_string());
+        needs_separator = true;
+    }
+}
+
+fn normalize_teaching_narrative(
+    teaching_narrative: Vec<String>,
+    teaching_angles: &[String],
+) -> Vec<String> {
+    let normalized = teaching_narrative
+        .into_iter()
+        .flat_map(|block| split_markdown_blocks(&block))
+        .collect::<Vec<_>>();
+
+    let has_headings = normalized
+        .iter()
+        .any(|block| block.trim_start().starts_with('#'));
+    if has_headings || normalized.len() != 1 {
+        return normalized;
+    }
+
+    let paragraphs = split_dense_paragraphs(&normalized[0]);
+    if paragraphs.len() <= 1 {
+        return normalized;
+    }
+
+    let mut structured = Vec::new();
+    for (index, paragraph) in paragraphs.into_iter().enumerate() {
+        if let Some(angle) = teaching_angles.get(index) {
+            let heading = angle.trim().trim_end_matches('.');
+            if !heading.is_empty() {
+                structured.push(format!("### {}", heading));
+            }
+        }
+        structured.push(paragraph);
+    }
+    structured
+}
+
+fn split_markdown_blocks(block: &str) -> Vec<String> {
+    block
+        .split("\n\n")
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn split_dense_paragraphs(text: &str) -> Vec<String> {
+    let sentences = split_sentences(text);
+    if sentences.len() < 4 {
+        return vec![text.trim().to_string()];
+    }
+
+    let chunk_size = if sentences.len() >= 9 { 3 } else { 2 };
+    sentences
+        .chunks(chunk_size)
+        .map(|chunk| chunk.join(" "))
+        .collect()
+}
+
+fn split_sentences(text: &str) -> Vec<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let chars: Vec<char> = trimmed.chars().collect();
+    let mut sentences = Vec::new();
+    let mut start = 0;
+    let mut index = 0;
+
+    while index < chars.len() {
+        let current = chars[index];
+        let is_terminal = matches!(current, '.' | '!' | '?');
+        let next_is_boundary = index + 1 == chars.len() || chars[index + 1].is_whitespace();
+
+        if is_terminal && next_is_boundary {
+            let sentence: String = chars[start..=index].iter().collect();
+            let sentence = sentence.trim();
+            if !sentence.is_empty() {
+                sentences.push(sentence.to_string());
+            }
+
+            index += 1;
+            while index < chars.len() && chars[index].is_whitespace() {
+                index += 1;
+            }
+            start = index;
+            continue;
+        }
+
+        index += 1;
+    }
+
+    if start < chars.len() {
+        let sentence: String = chars[start..].iter().collect();
+        let sentence = sentence.trim();
+        if !sentence.is_empty() {
+            sentences.push(sentence.to_string());
+        }
+    }
+
+    if sentences.is_empty() {
+        vec![trimmed.to_string()]
+    } else {
+        sentences
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{AiProvider, ResolvedLlmConfig};
     use crate::llm::DeepDiveArtifactMetadata;
+    use crate::llm::types::{KnowledgeResponse, QuizItem, QuizOption};
     use crate::session_analytics::{
         AdjustmentKind, AdjustmentMarker, ExternalResourceKind, ExternalResourceRef,
         SessionAnalytics,
@@ -1007,6 +1144,8 @@ mod tests {
                     kind: AdjustmentKind::PostFailurePivot,
                     from_tool_name: "shell".to_string(),
                     to_tool_name: "web.search_query".to_string(),
+                    from_argument_summary: Some("cmd=cat missing.txt".to_string()),
+                    to_argument_summary: Some("rust iterators".to_string()),
                 }],
             },
         };
@@ -1020,6 +1159,25 @@ mod tests {
                 url: "https://ratatui.rs/".to_string(),
                 summary: "Docs summary".to_string(),
                 why_it_matters: "Explains scrolling.".to_string(),
+            }],
+            quiz_groups: vec![KnowledgeResponse {
+                knowledge_type_group: "State management".to_string(),
+                summary: "App state drives the picker and viewer.".to_string(),
+                knowledge_type_language: "Rust".to_string(),
+                quiz: vec![QuizItem {
+                    question: "Which layer owns the deep-dive scroll offset?".to_string(),
+                    options: vec![
+                        QuizOption {
+                            selection: "The app state".to_string(),
+                            is_correct_answer: true,
+                        },
+                        QuizOption {
+                            selection: "The renderer only".to_string(),
+                            is_correct_answer: false,
+                        },
+                    ],
+                    resources: vec!["src/main.rs".to_string()],
+                }],
             }],
         };
 
@@ -1035,6 +1193,7 @@ mod tests {
             .find("## Interesting or Unexpected Learnings")
             .unwrap();
         let narrative = markdown.find("## Teaching Narrative").unwrap();
+        let quiz = markdown.find("## Quiz").unwrap();
         let reviewed = markdown.find("## Reviewed External Sources").unwrap();
         let urls = markdown.find("## Referenced URLs").unwrap();
         let analytics = markdown.find("## Session Analytics").unwrap();
@@ -1046,10 +1205,16 @@ mod tests {
         assert!(goal < accomplished);
         assert!(accomplished < learnings);
         assert!(learnings < narrative);
-        assert!(narrative < reviewed);
+        assert!(narrative < quiz);
+        assert!(quiz < reviewed);
         assert!(reviewed < urls);
         assert!(markdown.contains("- Tool calls: 3 / 4 successful"));
         assert!(markdown.contains("- rust iterators x2"));
+        assert!(markdown.contains(
+            "- shell -> web.search_query (pivot after failure): cmd=cat missing.txt -> rust iterators"
+        ));
+        assert!(markdown.contains("### State management"));
+        assert!(markdown.contains("#### Question 1"));
     }
 
     #[test]
@@ -1080,6 +1245,25 @@ mod tests {
                 summary: "Docs summary".to_string(),
                 why_it_matters: "Explains scrolling.".to_string(),
             }],
+            quiz_groups: vec![KnowledgeResponse {
+                knowledge_type_group: "Session selection".to_string(),
+                summary: "Selection drives deep-dive generation.".to_string(),
+                knowledge_type_language: "Rust".to_string(),
+                quiz: vec![QuizItem {
+                    question: "Which target starts a deep dive?".to_string(),
+                    options: vec![
+                        QuizOption {
+                            selection: "SessionSelectionTarget::DeepDive".to_string(),
+                            is_correct_answer: true,
+                        },
+                        QuizOption {
+                            selection: "AppView::Learning".to_string(),
+                            is_correct_answer: false,
+                        },
+                    ],
+                    resources: Vec::new(),
+                }],
+            }],
         };
         let sections = DeepDiveSectionsConfig {
             session_metadata: false,
@@ -1101,6 +1285,8 @@ mod tests {
         assert!(markdown.contains("# Deep Dive"));
         assert!(markdown.contains("## Goal"));
         assert!(markdown.contains("## Interesting or Unexpected Learnings"));
+        assert!(markdown.contains("## Quiz"));
+        assert!(markdown.contains("### Session selection"));
         assert!(markdown.contains("## Referenced URLs"));
         assert!(!markdown.contains("## Session Metadata"));
         assert!(!markdown.contains("## What Was Accomplished"));
@@ -1176,5 +1362,120 @@ mod tests {
 
         assert!(preamble.contains("quick first-pass"));
         assert!(preamble.contains("Do not spend time on hidden planning"));
+    }
+
+    #[test]
+    fn final_prompt_requests_structured_teaching_narrative() {
+        let bundle = build_session_research_bundle("Codex CLI", &sample_session());
+        let prompt = build_final_deep_dive_prompt(
+            &bundle,
+            &DeepDiveResearchPlan {
+                inferred_goal: "Ship a deep dive".to_string(),
+                candidate_accomplishments: vec!["Added formatting".to_string()],
+                candidate_interesting_learnings: vec!["Markdown needs spacing".to_string()],
+                teaching_angles: vec!["Explain the implementation path".to_string()],
+                selected_urls: Vec::new(),
+            },
+            &[],
+            &[],
+            5,
+        );
+
+        assert!(prompt.contains("do not return one large wall of text"));
+        assert!(prompt.contains("3 to 5 short sections"));
+        assert!(prompt.contains("`###` subheading"));
+        assert!(prompt.contains("quiz_groups"));
+        assert!(prompt.contains("at least 5 quiz questions overall"));
+    }
+
+    #[test]
+    fn render_deep_dive_markdown_preserves_teaching_narrative_spacing() {
+        let metadata = DeepDiveArtifactMetadata {
+            artifact_type: "session_deep_dive".to_string(),
+            title: "Deep Dive".to_string(),
+            generated_at: "2026-03-06T12:00:00Z".to_string(),
+            session_source: "Codex CLI".to_string(),
+            session_id: "session-123".to_string(),
+            session_timestamp: "2026-03-06T12:00:00Z".to_string(),
+            session_date: "2026-03-06".to_string(),
+            project_name: "learnchain".to_string(),
+            project_cwd: "/workspace/learnchain".to_string(),
+            source_file: "/tmp/session.jsonl".to_string(),
+            referenced_url_count: 0,
+            reviewed_url_count: 0,
+            session_analytics: SessionAnalytics::default(),
+        };
+        let response = StructuredDeepDiveResponse {
+            title: "Deep Dive".to_string(),
+            goal: "Ship the feature".to_string(),
+            accomplishments: Vec::new(),
+            interesting_learnings: Vec::new(),
+            teaching_narrative: vec![
+                "### Architecture".to_string(),
+                "The session mapped the feature to the right seam.".to_string(),
+                "### Outcome".to_string(),
+                "That kept the app loop simpler.".to_string(),
+            ],
+            reviewed_sources: Vec::new(),
+            quiz_groups: vec![KnowledgeResponse {
+                knowledge_type_group: "Narrative structure".to_string(),
+                summary: "Readable structure supports learning.".to_string(),
+                knowledge_type_language: "Markdown".to_string(),
+                quiz: vec![QuizItem {
+                    question: "Why split the narrative into sections?".to_string(),
+                    options: vec![
+                        QuizOption {
+                            selection: "To improve readability".to_string(),
+                            is_correct_answer: true,
+                        },
+                        QuizOption {
+                            selection: "To hide content from the user".to_string(),
+                            is_correct_answer: false,
+                        },
+                    ],
+                    resources: Vec::new(),
+                }],
+            }],
+        };
+
+        let markdown = render_deep_dive_markdown(
+            &metadata,
+            &response,
+            &[],
+            &DeepDiveSectionsConfig::default(),
+        );
+
+        assert!(markdown.contains(
+            "## Teaching Narrative\n\n### Architecture\n\nThe session mapped the feature to the right seam.\n\n### Outcome\n\nThat kept the app loop simpler."
+        ));
+        assert!(markdown.contains(
+            "## Quiz\n\n### Narrative structure\n- Language: Markdown\n\nReadable structure supports learning.\n\n#### Question 1"
+        ));
+    }
+
+    #[test]
+    fn normalize_teaching_narrative_splits_dense_single_block() {
+        let narrative = normalize_teaching_narrative(
+            vec!["The first lesson is to inspect existing seams before adding logic. That keeps changes local and easier to reason about. The second lesson is to prefer intermediate representations that support multiple downstream views. That makes generated artifacts more reliable. The final lesson is to validate the output format, not just the raw content, because readability affects how useful the artifact is.".to_string()],
+            &[
+                "Inspect the right seam".to_string(),
+                "Preserve reusable structure".to_string(),
+                "Validate the final artifact".to_string(),
+            ],
+        );
+
+        assert!(
+            narrative
+                .iter()
+                .any(|block| block == "### Inspect the right seam")
+        );
+        assert!(
+            narrative
+                .iter()
+                .any(|block| block == "### Preserve reusable structure")
+        );
+        assert!(narrative.iter().any(|block| {
+            block.contains("The second lesson is to prefer intermediate representations")
+        }));
     }
 }

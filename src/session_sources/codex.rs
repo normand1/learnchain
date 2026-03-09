@@ -624,12 +624,17 @@ fn parse_event_message(timestamp: String, payload: Value) -> Option<SessionEvent
 }
 
 fn extract_tool_result_metadata(output: &Value) -> Option<ToolResultMetadata> {
-    let value = match output {
-        Value::Object(map) => Value::Object(map.clone()),
-        Value::String(raw) => serde_json::from_str::<Value>(raw).ok()?,
-        _ => return None,
-    };
+    match output {
+        Value::Object(map) => metadata_from_value(&Value::Object(map.clone())),
+        Value::String(raw) => serde_json::from_str::<Value>(raw)
+            .ok()
+            .and_then(|value| metadata_from_value(&value))
+            .or_else(|| metadata_from_text(raw)),
+        _ => None,
+    }
+}
 
+fn metadata_from_value(value: &Value) -> Option<ToolResultMetadata> {
     Some(ToolResultMetadata {
         exit_code: value
             .get("metadata")
@@ -640,6 +645,31 @@ fn extract_tool_result_metadata(output: &Value) -> Option<ToolResultMetadata> {
             .get("metadata")
             .and_then(|metadata| metadata.get("duration_seconds"))
             .and_then(|value| value.as_f64()),
+    })
+}
+
+fn metadata_from_text(raw: &str) -> Option<ToolResultMetadata> {
+    let exit_code = raw.lines().find_map(|line| {
+        let trimmed = line.trim();
+        trimmed
+            .strip_prefix("Process exited with code ")
+            .and_then(|value| value.trim().parse::<i32>().ok())
+    });
+    let duration_seconds = raw.lines().find_map(|line| {
+        let trimmed = line.trim();
+        trimmed
+            .strip_prefix("Wall time: ")
+            .and_then(|value| value.strip_suffix(" seconds"))
+            .and_then(|value| value.trim().parse::<f64>().ok())
+    });
+
+    if exit_code.is_none() && duration_seconds.is_none() {
+        return None;
+    }
+
+    Some(ToolResultMetadata {
+        exit_code,
+        duration_seconds,
     })
 }
 
@@ -784,6 +814,18 @@ mod tests {
             .expect("expected reasoning event");
         assert_eq!(reasoning.payload_type, "agent_reasoning");
         assert!(reasoning.content_texts[0].contains("Preparing to create AGENTS.md file"));
+    }
+
+    #[test]
+    fn parse_plain_text_tool_output_extracts_exit_code_and_duration() {
+        let metadata = extract_tool_result_metadata(&Value::String(
+            "Chunk ID: abc123\nWall time: 0.0513 seconds\nProcess exited with code 0\nOutput:\nhello"
+                .to_string(),
+        ))
+        .expect("expected parsed metadata");
+
+        assert_eq!(metadata.exit_code, Some(0));
+        assert_eq!(metadata.duration_seconds, Some(0.0513));
     }
 
     #[test]

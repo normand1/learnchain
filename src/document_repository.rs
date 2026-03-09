@@ -10,7 +10,9 @@ use crate::{
     config::{self, AppConfig, DocumentRepositoryKind},
     llm::{DeepDiveDocument, StructuredLearningResponse},
     log_util::log_debug,
-    output_manager::{LibraryArtifactEntry, OutputManager},
+    output_manager::{
+        LibraryArtifactEntry, OutputManager, render_deep_dive_contents, render_learning_markdown,
+    },
 };
 
 const NOTION_API_BASE: &str = "https://api.notion.com/v1";
@@ -905,11 +907,10 @@ fn exportable_deep_dive_document(document: &DeepDiveDocument) -> ExportableDocum
     } else {
         document.metadata.title.clone()
     };
+    let markdown = render_deep_dive_contents(&document.metadata, &document.markdown)
+        .unwrap_or_else(|_| document.markdown.clone());
 
-    ExportableDocument {
-        title,
-        markdown: document.markdown.clone(),
-    }
+    ExportableDocument { title, markdown }
 }
 
 fn quiz_title(entry: &crate::output_manager::LearningArtifactHistoryEntry) -> String {
@@ -918,72 +919,6 @@ fn quiz_title(entry: &crate::output_manager::LearningArtifactHistoryEntry) -> St
     } else {
         format!("LearnChain Quiz - {}", entry.session_date)
     }
-}
-
-fn render_learning_markdown(response: &StructuredLearningResponse, session_date: &str) -> String {
-    let mut markdown = String::new();
-    let title = if session_date.trim().is_empty() {
-        "LearnChain Quiz".to_string()
-    } else {
-        format!("LearnChain Quiz - {}", session_date)
-    };
-    markdown.push_str("# ");
-    markdown.push_str(&title);
-    markdown.push_str("\n\n");
-
-    for (group_index, group) in response.response.iter().enumerate() {
-        let heading = if group.knowledge_type_group.trim().is_empty() {
-            format!("Knowledge Group {}", group_index + 1)
-        } else {
-            group.knowledge_type_group.clone()
-        };
-        markdown.push_str("## ");
-        markdown.push_str(&heading);
-        markdown.push('\n');
-
-        if !group.knowledge_type_language.trim().is_empty() {
-            markdown.push_str("- Language: ");
-            markdown.push_str(group.knowledge_type_language.trim());
-            markdown.push('\n');
-        }
-        if !group.summary.trim().is_empty() {
-            markdown.push('\n');
-            markdown.push_str(group.summary.trim());
-            markdown.push_str("\n\n");
-        } else {
-            markdown.push('\n');
-        }
-
-        for (quiz_index, quiz) in group.quiz.iter().enumerate() {
-            markdown.push_str("### Question ");
-            markdown.push_str(&(quiz_index + 1).to_string());
-            markdown.push('\n');
-            markdown.push_str(quiz.question.trim());
-            markdown.push_str("\n\n");
-
-            for option in &quiz.options {
-                markdown.push_str("- ");
-                markdown.push_str(option.selection.trim());
-                if option.is_correct_answer {
-                    markdown.push_str(" (correct)");
-                }
-                markdown.push('\n');
-            }
-
-            if !quiz.resources.is_empty() {
-                markdown.push_str("\nResources:\n");
-                for resource in &quiz.resources {
-                    markdown.push_str("- ");
-                    markdown.push_str(resource.trim());
-                    markdown.push('\n');
-                }
-            }
-
-            markdown.push('\n');
-        }
-    }
-
-    markdown.trim_end().to_string()
 }
 
 fn markdown_to_notion_blocks(markdown: &str) -> Vec<Value> {
@@ -1308,7 +1243,12 @@ fn learnchain_filename(title: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::DeepDiveArtifactMetadata;
     use crate::llm::types::{KnowledgeResponse, QuizItem, QuizOption};
+    use crate::session_analytics::{
+        AdjustmentKind, AdjustmentMarker, ExternalResourceKind, ExternalResourceRef,
+        SessionAnalytics,
+    };
 
     #[test]
     fn extract_notion_id_supports_urls_and_raw_ids() {
@@ -1405,5 +1345,56 @@ mod tests {
         assert_eq!(auth.user.id, "user-123");
         assert_eq!(auth.user.email.as_deref(), Some("person@example.com"));
         assert_eq!(auth.user.username.as_deref(), Some("person"));
+    }
+
+    #[test]
+    fn exportable_deep_dive_document_preserves_front_matter() {
+        let document = DeepDiveDocument {
+            metadata: DeepDiveArtifactMetadata {
+                artifact_type: "session_deep_dive".to_string(),
+                title: "Deep Dive".to_string(),
+                generated_at: "2026-03-08T12:00:00Z".to_string(),
+                session_source: "Codex CLI".to_string(),
+                session_id: "session-123".to_string(),
+                session_timestamp: "2026-03-08T12:00:00Z".to_string(),
+                session_date: "2026-03-08".to_string(),
+                project_name: "learnchain".to_string(),
+                project_cwd: "/workspace/learnchain".to_string(),
+                source_file: "/tmp/session.jsonl".to_string(),
+                referenced_url_count: 2,
+                reviewed_url_count: 1,
+                session_analytics: SessionAnalytics {
+                    total_tool_calls: 4,
+                    successful_tool_calls: 2,
+                    failed_tool_calls: 1,
+                    unknown_outcome_tool_calls: 1,
+                    mcp_tool_calls: 1,
+                    external_lookup_calls: 2,
+                    adjust_course_count: 1,
+                    external_resources: vec![ExternalResourceRef {
+                        kind: ExternalResourceKind::Web,
+                        tool_name: "web.search_query".to_string(),
+                        label: "rust iterators".to_string(),
+                        count: 2,
+                    }],
+                    adjustments: vec![AdjustmentMarker {
+                        kind: AdjustmentKind::PostFailurePivot,
+                        from_tool_name: "shell".to_string(),
+                        to_tool_name: "web.search_query".to_string(),
+                        from_argument_summary: Some("cmd=cat missing.txt".to_string()),
+                        to_argument_summary: Some("rust iterators".to_string()),
+                    }],
+                },
+            },
+            markdown: "# Deep Dive\n\nBody".to_string(),
+            path: "output/deep-dives/deep-dive.md".into(),
+        };
+
+        let exportable = exportable_deep_dive_document(&document);
+
+        assert!(exportable.markdown.starts_with("+++\n"));
+        assert!(exportable.markdown.contains("[session_analytics]"));
+        assert!(exportable.markdown.contains("total_tool_calls = 4"));
+        assert!(exportable.markdown.contains("# Deep Dive\n\nBody"));
     }
 }

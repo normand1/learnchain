@@ -618,17 +618,9 @@ impl<'a> UiRenderer<'a> {
             details.push("- None".to_string());
         } else {
             for adjustment in &session.analytics.adjustments {
-                let description = match adjustment.kind {
-                    crate::session_analytics::AdjustmentKind::PostFailurePivot => {
-                        "pivot after failure"
-                    }
-                    crate::session_analytics::AdjustmentKind::RetryWithDifferentArguments => {
-                        "changed args after failure"
-                    }
-                };
                 details.push(format!(
-                    "- {} -> {} ({})",
-                    adjustment.from_tool_name, adjustment.to_tool_name, description
+                    "- {}",
+                    crate::session_analytics::describe_adjustment(adjustment)
                 ));
             }
         }
@@ -2788,6 +2780,8 @@ mod tests {
                     kind: AdjustmentKind::PostFailurePivot,
                     from_tool_name: "shell".to_string(),
                     to_tool_name: "web.search_query".to_string(),
+                    from_argument_summary: Some("cmd=cat missing.txt".to_string()),
+                    to_argument_summary: Some("rust iterators".to_string()),
                 }],
             },
             events: vec![SessionEvent {
@@ -2812,6 +2806,8 @@ mod tests {
         assert!(detail_text.contains("Tool calls: 2 / 4 successful"));
         assert!(detail_text.contains("MCP calls: 1"));
         assert!(detail_text.contains("- rust iterators x2"));
-        assert!(detail_text.contains("- shell -> web.search_query (pivot after failure)"));
+        assert!(detail_text.contains(
+            "- shell -> web.search_query (pivot after failure): cmd=cat missing.txt -> rust iterators"
+        ));
     }
 }

@@ -82,6 +82,7 @@ pub enum SessionEventKind {
 #[derive(Debug, Clone)]
 pub struct ToolResultMetadata {
     pub exit_code: Option<i32>,
+    #[allow(dead_code)]
     pub duration_seconds: Option<f64>,
 }
 

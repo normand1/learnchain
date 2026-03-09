@@ -111,6 +111,12 @@ pub(crate) fn handle_learning_success(app: &mut App, mut result: LearningGenerat
 pub(crate) fn handle_deep_dive_success(app: &mut App, result: DeepDiveGenerationResult) {
     let usage = result.usage.clone();
     let reviewed_failures = result.reviewed_source_failures;
+    let quiz_question_count: usize = result
+        .response
+        .quiz_groups
+        .iter()
+        .map(|group| group.quiz.len())
+        .sum();
     let document = result.document;
     let mut status_parts = vec![
         format!("Saved to {}", document.path.display()),
@@ -119,6 +125,7 @@ pub(crate) fn handle_deep_dive_success(app: &mut App, result: DeepDiveGeneration
             document.metadata.referenced_url_count
         ),
         format!("Reviewed URLs: {}", document.metadata.reviewed_url_count),
+        format!("Quiz questions: {}", quiz_question_count),
     ];
     if !reviewed_failures.is_empty() {
         status_parts.push(format!("Fetch failures: {}", reviewed_failures.len()));
@@ -357,6 +364,7 @@ pub(crate) fn trigger_deep_dive_response_from_session(app: &mut App, session: Se
     let session_source = app.session_source.clone();
     let provider_label = app.ai_provider.label().to_string();
     let deep_dive_sections = app.config_form.deep_dive_sections.clone();
+    let min_quiz_questions = app.config_form.min_quiz_questions;
 
     thread::spawn(move || {
         log_debug(&format!(
@@ -386,6 +394,7 @@ pub(crate) fn trigger_deep_dive_response_from_session(app: &mut App, session: Se
             &session_source,
             session,
             deep_dive_sections,
+            min_quiz_questions,
             &sender,
         ));
         drop(runtime);

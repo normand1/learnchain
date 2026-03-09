@@ -4,7 +4,7 @@ use rig::completion::Usage;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::types::LlmUsage;
+use super::types::{KnowledgeResponse, LlmUsage};
 use crate::session_analytics::SessionAnalytics;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -82,6 +82,8 @@ pub struct StructuredDeepDiveResponse {
     pub teaching_narrative: Vec<String>,
     #[serde(default)]
     pub reviewed_sources: Vec<DeepDiveReviewedSource>,
+    #[serde(default)]
+    pub quiz_groups: Vec<KnowledgeResponse>,
 }
 
 #[derive(Debug, Clone, Default)]

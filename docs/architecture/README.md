@@ -4,6 +4,7 @@ This directory records architecture decisions that materially changed LearnChain
 
 Current decisions:
 
+- [2026-03-08: Deep-dive markdown structure and embedded quiz](./2026-03-08-deep-dive-markdown-structure.md)
 - [2026-03-08: Codex session analytics data model](./2026-03-08-codex-session-analytics.md)
 - [2026-03-07: Codex deep-dive action](./2026-03-07-codex-deep-dive-action.md)
 - [2026-03-06: External document export API integration requirements](./2026-03-06-document-export-api-integration.md)

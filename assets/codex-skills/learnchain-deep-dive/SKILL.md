@@ -23,6 +23,7 @@ After success, report:
 - deep-dive title
 - exported repository name
 - exported repository URL when one is returned
+- if the returned export URL matches `http://localhost:3000/api/documents/<id>` or `<site>/api/documents/<id>`, present the human-readable dashboard URL instead as `http://localhost:3000/dashboard/documents/<id>` or `<site>/dashboard/documents/<id>`
 - short summary based on the goal and accomplishment bullets
 
 If the command reports a fallback note about `CODEX_THREAD_ID`, include it.
