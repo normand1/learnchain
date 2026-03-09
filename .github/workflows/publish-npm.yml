@@ -7,12 +7,14 @@ on:
 
 permissions:
   contents: read  # Required to download release assets
+  id-token: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write
     env:
       PACKAGE_NAME: learnchain
 
@@ -96,16 +98,8 @@ jobs:
           echo "Package size:"
           du -sh .
 
-      - name: Verify npm auth
-        if: steps.version_check.outputs.exists != 'true'
-        run: npm whoami
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
       - name: Publish to npm
         if: steps.version_check.outputs.exists != 'true'
         run: |
           echo "Publishing ${PACKAGE_NAME} to npm"
-          npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          npm publish --provenance --access public
