@@ -21,7 +21,7 @@ dotenvy = "0.15"
 rand = "0.9"
 rusqlite = { version = "0.31", features = ["bundled"] }
 regex = "1.11"
-html2text = "0.13"
+html2text = "0.16"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "charset", "http2", "multipart"] }
 
 [dev-dependencies]
