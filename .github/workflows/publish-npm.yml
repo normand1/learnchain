@@ -45,8 +45,13 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Upgrade npm for trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm --version
 
       - name: Align package version with release tag
         run: |
@@ -102,4 +107,5 @@ jobs:
         if: steps.version_check.outputs.exists != 'true'
         run: |
           echo "Publishing ${PACKAGE_NAME} to npm"
+          echo "Using trusted publishing via OIDC"
           npm publish --provenance --access public
