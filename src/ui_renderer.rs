@@ -1,6 +1,7 @@
-use crate::view_managers::menu_manager::MENU_OPTIONS;
+use crate::view_managers::menu_manager::{MenuOptionSection, menu_options};
 use crate::{
-    AI_LOADING_FRAMES, App, AppView, SessionSelectionTarget, config,
+    AI_LOADING_FRAMES, App, AppView, EmbeddedSkillTarget, LearnChainSetupAuthMethod,
+    LearnChainSetupField, LearnChainSetupStep, SessionSelectionTarget, config,
     knowledge_store::{DailyAnalytics, KnowledgeAnalytics},
     markdown_rules::MarkdownRules,
     reset_learning_feedback,
@@ -29,6 +30,8 @@ impl<'a> UiRenderer<'a> {
     pub(crate) fn render(&mut self, frame: &mut Frame) {
         match self.app.view {
             AppView::Menu => self.render_menu(frame),
+            AppView::LearnChainSetup => self.render_learnchain_setup(frame),
+            AppView::SkillInstaller => self.render_skill_installer(frame),
             AppView::Events => self.render_events(frame),
             AppView::SessionPicker => self.render_session_picker(frame),
             AppView::Learning => self.render_learning(frame),
@@ -41,12 +44,23 @@ impl<'a> UiRenderer<'a> {
 
     fn render_menu(&mut self, frame: &mut Frame) {
         let app = &mut *self.app;
+        let options = menu_options(app);
+        if options.is_empty() {
+            app.menu_index = 0;
+        } else if app.menu_index >= options.len() {
+            app.menu_index = options.len() - 1;
+        }
         let session_title = if app.session_source == "Claude Code" {
             "Claude Sessions"
         } else {
             "Codex Sessions"
         };
-        let header_title = Line::from(format!("{} • {}", session_title, app.session_date))
+        let quiz_session_date = if app.active_quiz_session_date.trim().is_empty() {
+            &app.session_date
+        } else {
+            &app.active_quiz_session_date
+        };
+        let header_title = Line::from(format!("{} • {}", session_title, quiz_session_date))
             .bold()
             .blue()
             .centered();
@@ -56,7 +70,7 @@ impl<'a> UiRenderer<'a> {
             .constraints([
                 Constraint::Length(7),
                 Constraint::Length(3),
-                Constraint::Length(10),
+                Constraint::Length(14),
                 Constraint::Length(4),
             ])
             .split(frame.area());
@@ -147,14 +161,41 @@ impl<'a> UiRenderer<'a> {
             layout[1],
         );
 
+        let actions_count = options
+            .iter()
+            .filter(|option| option.section == MenuOptionSection::Actions)
+            .count() as u16;
+        let config_count = options
+            .iter()
+            .filter(|option| option.section == MenuOptionSection::Config)
+            .count() as u16;
+        let installer_count = options
+            .iter()
+            .filter(|option| option.section == MenuOptionSection::CodingToolInstallers)
+            .count() as u16;
         let menu_sections = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(6), Constraint::Length(4)])
+            .constraints([
+                Constraint::Length(actions_count + 2),
+                Constraint::Length(config_count + 2),
+                Constraint::Length(installer_count + 2),
+            ])
             .split(layout[2]);
 
-        let actions_items: Vec<ListItem> = MENU_OPTIONS[..4]
+        let actions_items: Vec<ListItem> = options
             .iter()
-            .map(|label| ListItem::new(*label))
+            .filter(|option| option.section == MenuOptionSection::Actions)
+            .map(|option| {
+                let line = if option.highlight_red {
+                    Line::from(Span::styled(
+                        option.label.clone(),
+                        Style::default().fg(Color::LightRed),
+                    ))
+                } else {
+                    Line::from(option.label.clone())
+                };
+                ListItem::new(line)
+            })
             .collect();
         let actions_len = actions_items.len();
         let mut actions_state = ListState::default();
@@ -171,12 +212,14 @@ impl<'a> UiRenderer<'a> {
             &mut actions_state,
         );
 
-        let config_items: Vec<ListItem> = MENU_OPTIONS[4..]
+        let config_items: Vec<ListItem> = options
             .iter()
-            .map(|label| ListItem::new(*label))
+            .filter(|option| option.section == MenuOptionSection::Config)
+            .map(|option| ListItem::new(option.label.clone()))
             .collect();
+        let config_items_len = config_items.len();
         let mut config_state = ListState::default();
-        if app.menu_index >= actions_len {
+        if app.menu_index >= actions_len && app.menu_index < actions_len + config_items_len {
             config_state.select(Some(app.menu_index - actions_len));
         }
 
@@ -189,6 +232,26 @@ impl<'a> UiRenderer<'a> {
             &mut config_state,
         );
 
+        let installer_items: Vec<ListItem> = options
+            .iter()
+            .filter(|option| option.section == MenuOptionSection::CodingToolInstallers)
+            .map(|option| ListItem::new(option.label.clone()))
+            .collect();
+        let mut installer_state = ListState::default();
+        let installer_start = actions_len + config_items_len;
+        if app.menu_index >= installer_start {
+            installer_state.select(Some(app.menu_index - installer_start));
+        }
+
+        frame.render_stateful_widget(
+            List::new(installer_items)
+                .block(Block::bordered().title(Line::from("Coding Tool Installers")))
+                .highlight_symbol("▶ ")
+                .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+            menu_sections[2],
+            &mut installer_state,
+        );
+
         let mut status_lines = Vec::new();
         if let Some(error) = &app.error {
             status_lines.push(format!("Error: {}", error));
@@ -197,9 +260,12 @@ impl<'a> UiRenderer<'a> {
             status_lines.push(format!("AI: {}", status));
         }
         status_lines.push("Use ↑/↓ or j/k to choose. Press Enter to select.".to_string());
-        status_lines.push("Press 1-6 for quick selection. Esc, Ctrl-C, or q to quit.".to_string());
+        status_lines.push(format!(
+            "Press 1-{} for quick selection. Esc, Ctrl-C, or q to quit.",
+            options.len()
+        ));
         if app.learning_response.is_some() {
-            status_lines.push("Press l to revisit the latest learning response.".to_string());
+            status_lines.push("Press l to revisit the latest quiz.".to_string());
         }
         status_lines.push("Press c to configure details.".to_string());
 
@@ -207,6 +273,382 @@ impl<'a> UiRenderer<'a> {
             Paragraph::new(status_lines.join("\n"))
                 .block(Block::bordered().title(Line::from("Status"))),
             layout[3],
+        );
+    }
+
+    fn render_learnchain_setup(&mut self, frame: &mut Frame) {
+        let app = &mut *self.app;
+        if app.learnchain_setup.step == LearnChainSetupStep::Success {
+            self.render_learnchain_setup_success(frame);
+            return;
+        }
+
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(4),
+                Constraint::Min(14),
+                Constraint::Length(7),
+            ])
+            .split(frame.area());
+
+        frame.render_widget(
+            Paragraph::new(match app.learnchain_setup.step {
+                LearnChainSetupStep::Account => {
+                    "First-time LearnChain setup\nStep 1 of 3 • Create or sign into your account"
+                }
+                LearnChainSetupStep::Authenticate => {
+                    "First-time LearnChain setup\nStep 2 of 3 • Authenticate LearnChain in this TUI"
+                }
+                LearnChainSetupStep::Success => "First-time LearnChain setup\nStep 3 of 3 • Done",
+            })
+            .block(Block::bordered().title(Line::from("LearnChain Setup").bold().blue()))
+            .centered(),
+            layout[0],
+        );
+
+        match app.learnchain_setup.step {
+            LearnChainSetupStep::Account => {
+                let login_url =
+                    config::learnchain_signup_url(&config::current().learnchain_site_url);
+                let body = vec![
+                    Line::from("Step 1"),
+                    Line::from(""),
+                    Line::from("Create a LearnChain account or sign into an existing one."),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("Open: ", Style::default().fg(Color::Rgb(140, 160, 220))),
+                        Span::styled(login_url, Style::default().fg(Color::Rgb(189, 255, 154))),
+                    ]),
+                    Line::from(""),
+                    Line::from(
+                        "Once your account is ready, press Enter to choose how to authenticate this CLI.",
+                    ),
+                ];
+                frame.render_widget(
+                    Paragraph::new(Text::from(body))
+                        .block(Block::bordered().title(Line::from("Account Setup")))
+                        .wrap(Wrap { trim: false }),
+                    layout[1],
+                );
+            }
+            LearnChainSetupStep::Authenticate => {
+                let body = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+                    .split(layout[1]);
+
+                let methods = [
+                    LearnChainSetupAuthMethod::EmailPassword,
+                    LearnChainSetupAuthMethod::CliAuthCode,
+                ];
+                let method_items = methods
+                    .iter()
+                    .map(|method| {
+                        let marker = if *method == app.learnchain_setup.auth_method {
+                            "●"
+                        } else {
+                            "○"
+                        };
+                        ListItem::new(format!("{} {}", marker, method.label()))
+                    })
+                    .collect::<Vec<_>>();
+                let mut method_state = ListState::default();
+                method_state.select(Some(match app.learnchain_setup.auth_method {
+                    LearnChainSetupAuthMethod::EmailPassword => 0,
+                    LearnChainSetupAuthMethod::CliAuthCode => 1,
+                }));
+                frame.render_stateful_widget(
+                    List::new(method_items)
+                        .block(Block::bordered().title(Line::from("Auth Method")))
+                        .highlight_symbol("▶ ")
+                        .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+                    body[0],
+                    &mut method_state,
+                );
+
+                let mut lines = vec![
+                    Line::from("Step 2"),
+                    Line::from(""),
+                    Line::from("Use ↑/↓ to move between fields. Left/Right switches auth method."),
+                    Line::from(""),
+                ];
+                lines.push(Self::setup_field_line(
+                    app,
+                    LearnChainSetupField::AuthMethod,
+                    "Authentication method",
+                    app.learnchain_setup.auth_method.label().to_string(),
+                ));
+                match app.learnchain_setup.auth_method {
+                    LearnChainSetupAuthMethod::EmailPassword => {
+                        lines.push(Self::setup_field_line(
+                            app,
+                            LearnChainSetupField::Email,
+                            "Email",
+                            if app.learnchain_setup.email_input.trim().is_empty() {
+                                "<enter your LearnChain email>".to_string()
+                            } else {
+                                app.learnchain_setup.email_input.clone()
+                            },
+                        ));
+                        lines.push(Self::setup_field_line(
+                            app,
+                            LearnChainSetupField::Password,
+                            "Password",
+                            if app.learnchain_setup.password_input.is_empty() {
+                                "<enter your LearnChain password>".to_string()
+                            } else {
+                                "•".repeat(app.learnchain_setup.password_input.chars().count())
+                            },
+                        ));
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(
+                            "This reuses the same password sign-in flow as learnchain.co/login.",
+                        ));
+                    }
+                    LearnChainSetupAuthMethod::CliAuthCode => {
+                        lines.push(Self::setup_field_line(
+                            app,
+                            LearnChainSetupField::AuthCode,
+                            "CLI auth code",
+                            if app.learnchain_setup.auth_code_input.trim().is_empty() {
+                                "<paste the code from /dashboard/cli-auth>".to_string()
+                            } else {
+                                app.learnchain_setup.auth_code_input.clone()
+                            },
+                        ));
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(format!(
+                            "Find this code after signing in at {}/cli-auth",
+                            config::learnchain_dashboard_url(
+                                &config::current().learnchain_site_url
+                            )
+                        )));
+                    }
+                }
+                lines.push(Line::from(""));
+                lines.push(Self::setup_field_line(
+                    app,
+                    LearnChainSetupField::Submit,
+                    "Submit",
+                    "Press Enter to authenticate".to_string(),
+                ));
+
+                frame.render_widget(
+                    Paragraph::new(Text::from(lines))
+                        .block(Block::bordered().title(Line::from("Authentication")))
+                        .wrap(Wrap { trim: false }),
+                    body[1],
+                );
+            }
+            LearnChainSetupStep::Success => {}
+        }
+
+        let mut footer_lines = Vec::new();
+        if let Some(error) = &app.learnchain_setup.error {
+            footer_lines.push(format!("Error: {}", error));
+        } else if let Some(status) = &app.learnchain_setup.status {
+            footer_lines.push(status.clone());
+        }
+        footer_lines.push(match app.learnchain_setup.step {
+            LearnChainSetupStep::Account => {
+                "Press Enter to continue. Backspace or m returns to the menu.".to_string()
+            }
+            LearnChainSetupStep::Authenticate => {
+                "Press Enter on Submit to authenticate. Backspace moves backward or returns to the menu.".to_string()
+            }
+            LearnChainSetupStep::Success => {
+                "Press any key to return to the main menu.".to_string()
+            }
+        });
+
+        frame.render_widget(
+            Paragraph::new(footer_lines.join("\n"))
+                .block(Block::bordered().title(Line::from("Status"))),
+            layout[2],
+        );
+    }
+
+    fn render_learnchain_setup_success(&mut self, frame: &mut Frame) {
+        let app = &mut *self.app;
+        let area = frame.area();
+        frame.render_widget(
+            Self::confetti_widget(area, app.learnchain_setup.confetti_frame),
+            area,
+        );
+
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(20),
+                Constraint::Length(10),
+                Constraint::Percentage(20),
+            ])
+            .split(area);
+
+        let success_text = vec![
+            Line::from("LearnChain setup complete").bold().centered(),
+            Line::from(""),
+            Line::from(format!(
+                "Authenticated as {}",
+                if app.learnchain_setup.success_account_label.trim().is_empty() {
+                    "unknown account"
+                } else {
+                    app.learnchain_setup.success_account_label.trim()
+                }
+            ))
+            .centered(),
+            Line::from(""),
+            Line::from("A valid LearnChain session is now stored for document export.").centered(),
+            Line::from("Press any key to return to the main menu.").centered(),
+        ];
+
+        frame.render_widget(
+            Paragraph::new(Text::from(success_text))
+                .style(Style::default().fg(Color::Rgb(230, 244, 255)))
+                .block(
+                    Block::bordered()
+                        .title(Line::from("Step 3 of 3 • Done"))
+                        .border_style(Style::default().fg(Color::Rgb(255, 205, 84))),
+                )
+                .centered(),
+            layout[1],
+        );
+    }
+
+    fn setup_field_line(
+        app: &App,
+        field: LearnChainSetupField,
+        label: &str,
+        value: String,
+    ) -> Line<'static> {
+        let prefix = if app.learnchain_setup.field == field {
+            "▶ "
+        } else {
+            "  "
+        };
+        Line::from(vec![
+            Span::styled(
+                prefix.to_string(),
+                Style::default().fg(Color::Rgb(189, 255, 154)),
+            ),
+            Span::styled(
+                format!("{}: ", label),
+                Style::default().fg(Color::Rgb(140, 160, 220)),
+            ),
+            Span::raw(value),
+        ])
+    }
+
+    fn confetti_widget(area: ratatui::layout::Rect, frame_index: usize) -> Paragraph<'static> {
+        let glyphs = ['*', '+', '.', 'o', 'x'];
+        let colors = [
+            Color::LightRed,
+            Color::LightGreen,
+            Color::LightBlue,
+            Color::Yellow,
+            Color::Magenta,
+            Color::Cyan,
+        ];
+        let mut lines = Vec::new();
+
+        for y in 0..area.height {
+            let mut spans = Vec::new();
+            for x in 0..area.width {
+                let is_particle =
+                    ((x as usize * 7) + (y as usize * 11) + frame_index).is_multiple_of(29);
+                if is_particle {
+                    let glyph = glyphs[(x as usize + y as usize + frame_index) % glyphs.len()];
+                    let color = colors[(x as usize * 3 + y as usize + frame_index) % colors.len()];
+                    spans.push(Span::styled(glyph.to_string(), Style::default().fg(color)));
+                } else {
+                    spans.push(Span::raw(" "));
+                }
+            }
+            lines.push(Line::from(spans));
+        }
+
+        Paragraph::new(Text::from(lines))
+    }
+
+    fn render_skill_installer(&mut self, frame: &mut Frame) {
+        let app = &mut *self.app;
+        let layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(8),
+                Constraint::Length(5),
+            ])
+            .split(frame.area());
+
+        frame.render_widget(
+            Paragraph::new("Choose which coding tool should receive the bundled LearnChain skill.")
+                .block(Block::bordered().title(Line::from("Install Agent Skill").bold().blue()))
+                .centered(),
+            layout[0],
+        );
+
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .split(layout[1]);
+
+        let targets = [EmbeddedSkillTarget::Codex, EmbeddedSkillTarget::ClaudeCode];
+        let items: Vec<ListItem> = targets
+            .iter()
+            .map(|target| ListItem::new(format!("Install for {}", target.label())))
+            .collect();
+        let selected_index = match app.skill_installer_selected_target {
+            EmbeddedSkillTarget::Codex => 0,
+            EmbeddedSkillTarget::ClaudeCode => 1,
+        };
+        let mut list_state = ListState::default();
+        list_state.select(Some(selected_index));
+
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(Block::bordered().title(Line::from("Targets")))
+                .highlight_symbol("▶ ")
+                .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+            body[0],
+            &mut list_state,
+        );
+
+        let details = match app.skill_installer_selected_target {
+            EmbeddedSkillTarget::Codex => {
+                "Destination: ~/.codex/skills/learnchain-deep-dive\n\nWrites:\n- SKILL.md\n- agents/openai.yaml"
+            }
+            EmbeddedSkillTarget::ClaudeCode => {
+                "Destination: ~/.claude/skills/learnchain-deep-dive\n\nWrites:\n- SKILL.md"
+            }
+        };
+
+        frame.render_widget(
+            Paragraph::new(details)
+                .wrap(Wrap { trim: false })
+                .block(Block::bordered().title(Line::from("Details"))),
+            body[1],
+        );
+
+        let mut status_lines = Vec::new();
+        if let Some(error) = &app.error {
+            status_lines.push(format!("Error: {}", error));
+        }
+        if let Some(status) = &app.ai_status {
+            status_lines.push(format!("Status: {}", status));
+        }
+        status_lines.push(
+            "Use ↑/↓, ←/→, or h/j/k/l to switch targets. Press Enter to install.".to_string(),
+        );
+        status_lines.push(
+            "Press Backspace or m to return to the menu. Esc, Ctrl-C, or q to quit.".to_string(),
+        );
+
+        frame.render_widget(
+            Paragraph::new(status_lines.join("\n"))
+                .block(Block::bordered().title(Line::from("Status"))),
+            layout[2],
         );
     }
 
@@ -735,7 +1177,7 @@ impl<'a> UiRenderer<'a> {
             .constraints([
                 Constraint::Length(3),
                 Constraint::Min(6),
-                Constraint::Length(4),
+                Constraint::Length(6),
             ])
             .split(frame.area());
 
@@ -1287,29 +1729,15 @@ impl<'a> UiRenderer<'a> {
             .constraints([Constraint::Min(8), Constraint::Length(6)])
             .split(layout[1]);
 
-        let mut question_text =
-            String::from("No learning response available. Generate one from the main menu.");
+        let mut question_text = String::from("No quiz available. Generate one from the main menu.");
         let mut resources_text = String::from("No resources to display.");
         let mut status_lines: Vec<String> = Vec::new();
 
         if app.ai_loading {
-            let frame_symbol = AI_LOADING_FRAMES[app.ai_loading_frame % AI_LOADING_FRAMES.len()];
-            let progress_bar = Self::render_progress_bar(app.ai_progress_percent, 30);
-            let elapsed = app
-                .ai_loading_start
-                .map(|start| {
-                    let secs = start.elapsed().as_secs();
-                    format!(" ({}s)", secs)
-                })
-                .unwrap_or_default();
-            let stage_message = if app.ai_progress_message.is_empty() {
-                "Initializing..."
-            } else {
-                &app.ai_progress_message
-            };
-            question_text = format!(
-                "{} Generating learning response…\n\n{} {}%\n{}{}\n\nWe'll show the quiz once the AI reply is ready.",
-                frame_symbol, progress_bar, app.ai_progress_percent, stage_message, elapsed
+            question_text = Self::render_ai_loading_timeline(
+                app,
+                "Generating quiz...",
+                "We'll show the quiz once the AI reply is ready.",
             );
             resources_text = String::from("Resources will appear after generation completes.");
         } else if let Some(response) = &app.learning_response {
@@ -1435,6 +1863,10 @@ impl<'a> UiRenderer<'a> {
             status_lines.push(format!("AI: {}", status));
         }
         status_lines.push("Press r to regenerate quiz from the latest session events.".to_string());
+        status_lines.push(
+            "Press x to publish this quiz to the configured document repository.".to_string(),
+        );
+        status_lines.push("Press e to view session events.".to_string());
         status_lines.push("Press m to return to the main menu.".to_string());
 
         frame.render_widget(
@@ -1462,20 +1894,10 @@ impl<'a> UiRenderer<'a> {
         let app = &mut *self.app;
 
         if app.ai_loading {
-            let frame_symbol = AI_LOADING_FRAMES[app.ai_loading_frame % AI_LOADING_FRAMES.len()];
-            let progress_bar = Self::render_progress_bar(app.ai_progress_percent, 30);
-            let elapsed = app
-                .ai_loading_start
-                .map(|start| format!(" ({}s)", start.elapsed().as_secs()))
-                .unwrap_or_default();
-            let stage_message = if app.ai_progress_message.is_empty() {
-                "Initializing..."
-            } else {
-                &app.ai_progress_message
-            };
-            let text = format!(
-                "{} Generating session deep dive…\n\n{} {}%\n{}{}\n\nWe'll show the markdown once the deep dive is ready.",
-                frame_symbol, progress_bar, app.ai_progress_percent, stage_message, elapsed
+            let text = Self::render_ai_loading_timeline(
+                app,
+                "Generating session deep dive...",
+                "We'll show the markdown once the deep dive is ready.",
             );
             frame.render_widget(
                 Paragraph::new(text)
@@ -1502,7 +1924,7 @@ impl<'a> UiRenderer<'a> {
             .constraints([
                 Constraint::Length(4),
                 Constraint::Min(10),
-                Constraint::Length(5),
+                Constraint::Length(6),
             ])
             .split(frame.area());
 
@@ -1545,6 +1967,9 @@ impl<'a> UiRenderer<'a> {
         status_lines.push(
             "Use j/k or PgUp/PgDn to scroll. Press h for history. Backspace returns from a history document."
                 .to_string(),
+        );
+        status_lines.push(
+            "Press x to publish this deep dive to the configured document repository.".to_string(),
         );
         status_lines.push("Press m to return to the menu.".to_string());
 
@@ -1813,7 +2238,7 @@ impl<'a> UiRenderer<'a> {
             .constraints([
                 Constraint::Length(5),
                 Constraint::Min(10),
-                Constraint::Length(3),
+                Constraint::Length(4),
             ])
             .split(frame.area());
 
@@ -1910,14 +2335,16 @@ impl<'a> UiRenderer<'a> {
         );
 
         frame.render_widget(
-            Paragraph::new("Press any key to return to the main menu.")
-                .style(Style::default().fg(Color::Rgb(180, 205, 255)))
-                .block(
-                    Block::bordered()
-                        .title(Line::from("Navigation"))
-                        .border_style(Style::default().fg(Color::Rgb(120, 140, 220))),
-                )
-                .centered(),
+            Paragraph::new(
+                "Press x to publish this quiz, or press any other key to return to the main menu.",
+            )
+            .style(Style::default().fg(Color::Rgb(180, 205, 255)))
+            .block(
+                Block::bordered()
+                    .title(Line::from("Navigation"))
+                    .border_style(Style::default().fg(Color::Rgb(120, 140, 220))),
+            )
+            .centered(),
             layout[2],
         );
     }
@@ -1942,9 +2369,11 @@ impl<'a> UiRenderer<'a> {
                 "Editing now: {}",
                 Self::config_field_title(app, current_field)
             )
+        } else if app.config_form.is_section_navigation_focused() {
+            format!("Focused section: {}", active_section.title())
         } else {
             format!(
-                "Focused setting: {}",
+                "Focused step: {}",
                 Self::config_field_title(app, current_field)
             )
         };
@@ -1990,13 +2419,17 @@ impl<'a> UiRenderer<'a> {
         section_state.select(Some(Self::config_section_index(active_section)));
         frame.render_stateful_widget(
             List::new(section_items)
-                .block(Block::bordered().title(Line::from("Sections")))
+                .block(
+                    Block::bordered()
+                        .title(Line::from("Sections"))
+                        .border_style(Self::config_nav_border_style(
+                            app.config_form.is_section_navigation_focused(),
+                        )),
+                )
                 .highlight_symbol("▸ ")
-                .highlight_style(
-                    Style::default()
-                        .fg(Color::Rgb(120, 200, 255))
-                        .add_modifier(Modifier::BOLD),
-                ),
+                .highlight_style(Self::config_nav_highlight_style(
+                    app.config_form.is_section_navigation_focused(),
+                )),
             columns[0],
             &mut section_state,
         );
@@ -2004,12 +2437,14 @@ impl<'a> UiRenderer<'a> {
         let field_items = fields_in_section
             .iter()
             .map(|field| {
+                let primary_line = Line::from(format!(
+                    "{}: {}",
+                    Self::config_field_title(app, *field),
+                    Self::config_field_value(app, *field)
+                ))
+                .style(Self::config_field_primary_style(app, *field));
                 ListItem::new(Text::from(vec![
-                    Line::from(format!(
-                        "{}: {}",
-                        Self::config_field_title(app, *field),
-                        Self::config_field_value(app, *field)
-                    )),
+                    primary_line,
                     Line::from(Self::config_field_summary(app, *field))
                         .style(Style::default().fg(Color::DarkGray)),
                 ]))
@@ -2019,9 +2454,17 @@ impl<'a> UiRenderer<'a> {
         field_state.select(Some(app.config_form.selected_index_in_section()));
         frame.render_stateful_widget(
             List::new(field_items)
-                .block(Block::bordered().title(Line::from(active_section.title())))
+                .block(
+                    Block::bordered()
+                        .title(Line::from(format!("Steps • {}", active_section.title())))
+                        .border_style(Self::config_nav_border_style(
+                            app.config_form.is_step_navigation_focused(),
+                        )),
+                )
                 .highlight_symbol("▶ ")
-                .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+                .highlight_style(Self::config_nav_highlight_style(
+                    app.config_form.is_step_navigation_focused(),
+                )),
             columns[1],
             &mut field_state,
         );
@@ -2032,7 +2475,8 @@ impl<'a> UiRenderer<'a> {
             Line::from(format!(
                 "Current value: {}",
                 Self::config_field_value(app, current_field)
-            )),
+            ))
+            .style(Self::config_field_primary_style(app, current_field)),
             Line::from(""),
             Line::from("How it changes the app:"),
             Line::from(Self::config_field_effect(app, current_field)),
@@ -2075,8 +2519,11 @@ impl<'a> UiRenderer<'a> {
                 ),
                 if app.config_form.is_editing_text_field() {
                     "Typing affects only the active field. Enter saves. Esc cancels.".to_string()
+                } else if app.config_form.is_section_navigation_focused() {
+                    "↑↓ choose a section. → moves into steps. Enter also moves into steps."
+                        .to_string()
                 } else {
-                    "↑↓ choose a field. ←→ changes selectors and numbers. Enter edits text fields."
+                    "↑↓ choose a step. ← returns to sections. h/l or +/- change values. Enter edits text fields."
                         .to_string()
                 },
             ]
@@ -2097,7 +2544,7 @@ impl<'a> UiRenderer<'a> {
                     active_section.title(),
                     fields_in_section.len()
                 ),
-                "↑↓ select within this section • ←→ adjust values • Enter edits text fields"
+                "↑↓ select • ←/→ switch between sections and steps • h/l or +/- adjust values"
                     .to_string(),
                 "s save • r reset • m save+menu • Esc/q quit".to_string(),
             ]
@@ -2116,6 +2563,24 @@ impl<'a> UiRenderer<'a> {
             config::ConfigSection::DeepDive => 1,
             config::ConfigSection::Export => 2,
             config::ConfigSection::Ai => 3,
+        }
+    }
+
+    fn config_nav_border_style(is_focused: bool) -> Style {
+        if is_focused {
+            Style::default().fg(Color::Rgb(120, 200, 255))
+        } else {
+            Style::default().fg(Color::DarkGray)
+        }
+    }
+
+    fn config_nav_highlight_style(is_focused: bool) -> Style {
+        if is_focused {
+            Style::default()
+                .fg(Color::Rgb(120, 200, 255))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
         }
     }
 
@@ -2154,7 +2619,9 @@ impl<'a> UiRenderer<'a> {
                             app.config_form.openrouter_model.clone()
                         }
                     }
-                    config::AiProvider::CodexCli => "CLI default".to_string(),
+                    config::AiProvider::CodexCli | config::AiProvider::ClaudeCodeCli => {
+                        "CLI default".to_string()
+                    }
                 };
                 format!("{} • {}", app.config_form.ai_provider.label(), model)
             }
@@ -2199,6 +2666,19 @@ impl<'a> UiRenderer<'a> {
             config::ConfigField::AnthropicKey => "Anthropic API key".to_string(),
             config::ConfigField::OpenRouterModel => "OpenRouter model".to_string(),
             config::ConfigField::OpenRouterKey => "OpenRouter API key".to_string(),
+        }
+    }
+
+    fn config_field_primary_style(app: &App, field: config::ConfigField) -> Style {
+        match field {
+            config::ConfigField::LearnChainAuthCode => {
+                match app.config_form.learnchain_auth_feedback() {
+                    config::LearnChainAuthFeedback::Success => Style::default().fg(Color::Green),
+                    config::LearnChainAuthFeedback::Failure => Style::default().fg(Color::Red),
+                    config::LearnChainAuthFeedback::Neutral => Style::default(),
+                }
+            }
+            _ => Style::default(),
         }
     }
 
@@ -2565,11 +3045,15 @@ impl<'a> UiRenderer<'a> {
                     &app.config_form.learnchain_site_url,
                 ))
             }
-            config::ConfigField::AiProvider
-                if app.config_form.ai_provider == config::AiProvider::CodexCli =>
-            {
-                Some(config::codex_cli_config_help_message().to_string())
-            }
+            config::ConfigField::AiProvider => match app.config_form.ai_provider {
+                config::AiProvider::CodexCli => {
+                    Some(config::codex_cli_config_help_message().to_string())
+                }
+                config::AiProvider::ClaudeCodeCli => {
+                    Some(config::claude_code_cli_config_help_message().to_string())
+                }
+                _ => None,
+            },
             config::ConfigField::DeepDiveSessionMetadata
             | config::ConfigField::DeepDiveGoal
             | config::ConfigField::DeepDiveAccomplishments
@@ -2645,6 +3129,86 @@ impl<'a> UiRenderer<'a> {
         let filled = ((percent as usize) * width) / 100;
         let empty = width - filled;
         format!("[{}{}]", "█".repeat(filled), "░".repeat(empty))
+    }
+
+    fn render_ai_loading_timeline(app: &App, title: &str, ready_message: &str) -> String {
+        let frame_symbol = AI_LOADING_FRAMES[app.ai_loading_frame % AI_LOADING_FRAMES.len()];
+        let progress_bar = Self::render_progress_bar(app.ai_progress_percent, 30);
+        let overall_elapsed_secs = app
+            .ai_loading_start
+            .map(|start| start.elapsed().as_secs())
+            .unwrap_or(0);
+        let stage_message = if app.ai_progress_message.is_empty() {
+            "Initializing..."
+        } else {
+            &app.ai_progress_message
+        };
+        let current_wait_secs = app
+            .ai_progress_timeline
+            .last()
+            .map(|step| {
+                step.completed_at_secs
+                    .unwrap_or(overall_elapsed_secs)
+                    .saturating_sub(step.started_at_secs)
+            })
+            .unwrap_or(overall_elapsed_secs);
+        let timeline_lines = if app.ai_progress_timeline.is_empty() {
+            vec![format!(
+                "[>] {} ({} so far)",
+                stage_message,
+                Self::format_elapsed_seconds(current_wait_secs)
+            )]
+        } else {
+            app.ai_progress_timeline
+                .iter()
+                .map(|step| {
+                    let end_secs = step.completed_at_secs.unwrap_or(overall_elapsed_secs);
+                    let duration = end_secs.saturating_sub(step.started_at_secs);
+                    if step.completed_at_secs.is_some() {
+                        format!(
+                            "[x] {} ({})",
+                            step.message,
+                            Self::format_elapsed_seconds(duration)
+                        )
+                    } else {
+                        format!(
+                            "[>] {} ({} so far)",
+                            step.message,
+                            Self::format_elapsed_seconds(duration)
+                        )
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+
+        format!(
+            "{} {}\n\nOverall: {} {}% ({})\nCurrent: {} ({} so far)\n\nTimeline:\n{}\n\n{}",
+            frame_symbol,
+            title,
+            progress_bar,
+            app.ai_progress_percent,
+            Self::format_elapsed_seconds(overall_elapsed_secs),
+            stage_message,
+            Self::format_elapsed_seconds(current_wait_secs),
+            timeline_lines.join("\n"),
+            ready_message
+        )
+    }
+
+    fn format_elapsed_seconds(secs: u64) -> String {
+        if secs == 0 {
+            "<1s".to_string()
+        } else if secs < 60 {
+            format!("{}s", secs)
+        } else {
+            let minutes = secs / 60;
+            let seconds = secs % 60;
+            if seconds == 0 {
+                format!("{}m", minutes)
+            } else {
+                format!("{}m {}s", minutes, seconds)
+            }
+        }
     }
 }
 

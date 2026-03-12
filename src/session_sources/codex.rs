@@ -45,6 +45,7 @@ impl CodexCliSource {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn load_latest_session(&self) -> Result<Session, String> {
         let (latest_file, traversal_error) = self.find_latest_recursively(&self.root_dir);
         let path = latest_file.ok_or_else(|| {
@@ -58,6 +59,7 @@ impl CodexCliSource {
         self.load_session_from_path(&path)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn load_session_by_id(&self, session_id: &str) -> Result<Session, String> {
         let (path, traversal_error) =
             self.find_file_by_session_id_recursively(&self.root_dir, session_id);
@@ -373,6 +375,7 @@ impl CodexCliSource {
         (files, entry_error)
     }
 
+    #[allow(dead_code)]
     fn find_file_by_session_id_recursively(
         &self,
         root: &Path,
@@ -522,6 +525,7 @@ pub(crate) fn parse_codex_session_file_with_metadata(path: &Path) -> ParsedCodex
     }
 }
 
+#[allow(dead_code)]
 fn read_codex_session_file_metadata(
     path: &Path,
 ) -> Result<Option<CodexSessionFileMetadata>, String> {
@@ -592,6 +596,35 @@ fn parse_response_item_event(timestamp: String, payload: Value) -> Option<Sessio
             Some(SessionEvent {
                 timestamp,
                 payload_type: "function_call_output".to_string(),
+                event_kind: SessionEventKind::ToolResult,
+                call_id: item.call_id,
+                tool_name: None,
+                arguments: None,
+                output: Some(SessionEvent::format_value(raw_output)),
+                result_metadata,
+                content_texts: Vec::new(),
+            })
+        }
+        "custom_tool_call" => Some(SessionEvent {
+            timestamp,
+            payload_type: "custom_tool_call".to_string(),
+            event_kind: SessionEventKind::ToolCall,
+            call_id: item.call_id,
+            tool_name: item.name,
+            arguments: item
+                .input
+                .or(item.arguments)
+                .map(SessionEvent::format_value),
+            output: None,
+            result_metadata: None,
+            content_texts: Vec::new(),
+        }),
+        "custom_tool_call_output" => {
+            let raw_output = item.output?;
+            let result_metadata = extract_tool_result_metadata(&raw_output);
+            Some(SessionEvent {
+                timestamp,
+                payload_type: "custom_tool_call_output".to_string(),
                 event_kind: SessionEventKind::ToolResult,
                 call_id: item.call_id,
                 tool_name: None,
@@ -724,6 +757,7 @@ struct RawResponseItem {
     call_id: Option<String>,
     output: Option<Value>,
     arguments: Option<Value>,
+    input: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -800,6 +834,59 @@ mod tests {
         let output = second.output.as_deref().expect("output should be present");
         assert!(output.contains("AGENTS.md"));
         assert!(output.contains("Cargo.toml"));
+    }
+
+    #[test]
+    fn parse_custom_tool_events_from_desktop_sessions() {
+        let tool_call = parse_codex_event(RawEventEnvelope {
+            timestamp: Some("2026-03-10T12:00:00Z".to_string()),
+            event_type: Some("response_item".to_string()),
+            payload: Some(serde_json::json!({
+                "type": "custom_tool_call",
+                "call_id": "call_patch",
+                "name": "apply_patch",
+                "input": "*** Begin Patch\n*** Update File: /tmp/example.rs\n@@\n-fn old() {}\n+fn new() {}\n*** End Patch"
+            })),
+        })
+        .expect("expected custom tool call");
+
+        assert_eq!(tool_call.event_kind, SessionEventKind::ToolCall);
+        assert_eq!(tool_call.payload_type, "custom_tool_call");
+        assert_eq!(tool_call.tool_name.as_deref(), Some("apply_patch"));
+        assert!(
+            tool_call
+                .arguments
+                .as_deref()
+                .is_some_and(|value| value.contains("*** Update File: /tmp/example.rs"))
+        );
+
+        let tool_result = parse_codex_event(RawEventEnvelope {
+            timestamp: Some("2026-03-10T12:00:02Z".to_string()),
+            event_type: Some("response_item".to_string()),
+            payload: Some(serde_json::json!({
+                "type": "custom_tool_call_output",
+                "call_id": "call_patch",
+                "output": "{\"output\":\"Success. Updated the following files:\\nM /tmp/example.rs\\n\",\"metadata\":{\"exit_code\":0,\"duration_seconds\":0.0}}"
+            })),
+        })
+        .expect("expected custom tool output");
+
+        assert_eq!(tool_result.event_kind, SessionEventKind::ToolResult);
+        assert_eq!(tool_result.payload_type, "custom_tool_call_output");
+        assert_eq!(tool_result.call_id.as_deref(), Some("call_patch"));
+        assert_eq!(
+            tool_result
+                .result_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.exit_code),
+            Some(0)
+        );
+        assert!(
+            tool_result
+                .output
+                .as_deref()
+                .is_some_and(|value| value.contains("/tmp/example.rs"))
+        );
     }
 
     #[test]

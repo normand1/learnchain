@@ -457,10 +457,22 @@ impl ClaudeContent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::{
+        fs,
+        path::Path,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn fixture_path(relative: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
+    }
+
+    fn unique_temp_file(prefix: &str) -> PathBuf {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_millis();
+        std::env::temp_dir().join(format!("learnchain-{prefix}-{millis}.jsonl"))
     }
 
     #[test]
@@ -541,5 +553,115 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("tool: Read"))
         );
+    }
+
+    #[test]
+    fn parse_claude_tool_use_preserves_edit_write_and_multiedit_inputs() {
+        let path = unique_temp_file("claude-tool-use");
+        let lines = vec![
+            serde_json::json!({
+                "timestamp": "2026-03-10T12:00:00Z",
+                "cwd": "/workspace/learnchain",
+                "sessionId": "session-123",
+                "message": {
+                    "id": "msg-edit",
+                    "role": "assistant",
+                    "model": "claude-opus-4-6",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_edit",
+                        "name": "Edit",
+                        "input": {
+                            "file_path": "/workspace/learnchain/src/App.tsx",
+                            "old_string": "const oldValue = true;",
+                            "new_string": "const newValue = true;",
+                            "replace_all": false
+                        }
+                    }]
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "timestamp": "2026-03-10T12:00:01Z",
+                "cwd": "/workspace/learnchain",
+                "sessionId": "session-123",
+                "message": {
+                    "id": "msg-write",
+                    "role": "assistant",
+                    "model": "claude-opus-4-6",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_write",
+                        "name": "Write",
+                        "input": {
+                            "file_path": "/workspace/learnchain/docs/deep-dive.md",
+                            "content": "# Deep Dive\n\nUseful notes"
+                        }
+                    }]
+                }
+            })
+            .to_string(),
+            serde_json::json!({
+                "timestamp": "2026-03-10T12:00:02Z",
+                "cwd": "/workspace/learnchain",
+                "sessionId": "session-123",
+                "message": {
+                    "id": "msg-multi",
+                    "role": "assistant",
+                    "model": "claude-opus-4-6",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_multi",
+                        "name": "MultiEdit",
+                        "input": {
+                            "file_path": "/workspace/learnchain/src/App.tsx",
+                            "edits": [
+                                {
+                                    "old_string": "const oldValue = true;",
+                                    "new_string": "const nextValue = true;"
+                                },
+                                {
+                                    "old_string": "const otherOld = false;",
+                                    "new_string": "const otherNew = false;"
+                                }
+                            ]
+                        }
+                    }]
+                }
+            })
+            .to_string(),
+        ];
+        fs::write(&path, lines.join("\n")).expect("write temp session");
+
+        let (events, error) = parse_claude_session_file(&path);
+        let _ = fs::remove_file(&path);
+
+        assert!(error.is_none(), "unexpected parse error: {:?}", error);
+        assert_eq!(events.len(), 3);
+
+        let edit_event = events
+            .iter()
+            .find(|event| event.tool_name.as_deref() == Some("Edit"))
+            .expect("edit event");
+        assert_eq!(edit_event.payload_type, "tool_use: Edit");
+        let edit_args = edit_event.arguments.as_deref().expect("edit args");
+        assert!(edit_args.contains("\"file_path\""));
+        assert!(edit_args.contains("\"new_string\""));
+
+        let write_event = events
+            .iter()
+            .find(|event| event.tool_name.as_deref() == Some("Write"))
+            .expect("write event");
+        let write_args = write_event.arguments.as_deref().expect("write args");
+        assert!(write_args.contains("\"content\""));
+        assert!(write_args.contains("deep-dive.md"));
+
+        let multi_event = events
+            .iter()
+            .find(|event| event.tool_name.as_deref() == Some("MultiEdit"))
+            .expect("multiedit event");
+        let multi_args = multi_event.arguments.as_deref().expect("multiedit args");
+        assert!(multi_args.contains("\"edits\""));
+        assert!(multi_args.contains("nextValue"));
     }
 }

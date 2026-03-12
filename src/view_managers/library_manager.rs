@@ -117,7 +117,9 @@ impl<'a> LibraryManager<'a> {
             }
             LibraryArtifactEntry::Quiz(entry) => {
                 match manager.read_learning_response(&entry.path) {
-                    Ok(response) => self.load_learning_response(response, &entry.path),
+                    Ok(response) => {
+                        self.load_learning_response(response, &entry.path, &entry.session_date)
+                    }
                     Err(err) => App::push_error(
                         &mut self.app.error,
                         format!("Failed to read quiz artifact: {}", err),
@@ -141,8 +143,10 @@ impl<'a> LibraryManager<'a> {
         &mut self,
         response: StructuredLearningResponse,
         path: &std::path::Path,
+        session_date: &str,
     ) {
         self.app.learning_response = Some(response);
+        self.app.active_quiz_session_date = session_date.to_string();
         self.app.learning_group_index = 0;
         self.app.learning_quiz_index = 0;
         self.app.learning_option_index = 0;

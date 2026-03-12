@@ -1,6 +1,6 @@
 use super::events_manager::EventsManager;
 use crate::{
-    App, AppView, QuizSummaryResult,
+    App, AppView, QuizSummaryResult, document_repository,
     llm::{self, StructuredLearningResponse},
     log_util::log_debug,
     output_manager::OutputManager,
@@ -30,7 +30,7 @@ impl<'a> LearningManager<'a> {
         } else {
             App::push_error(
                 &mut app.error,
-                "No learning response available. Generate one from the menu.".to_string(),
+                "No quiz available. Generate one from the menu.".to_string(),
             );
         }
     }
@@ -44,6 +44,7 @@ impl<'a> LearningManager<'a> {
             return;
         }
 
+        app.active_quiz_session_date = session.date.clone();
         let output_manager = OutputManager::new();
         let artifact = output_manager.write_markdown_summary(
             &session.events,
@@ -67,9 +68,12 @@ impl<'a> LearningManager<'a> {
     }
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) {
-        // If showing summary screen, any key returns to menu
         if self.app.learning_showing_summary {
-            self.app.return_to_menu();
+            match (key.modifiers, key.code) {
+                (KeyModifiers::NONE, KeyCode::Char('x'))
+                | (KeyModifiers::NONE, KeyCode::Char('X')) => self.export_current_quiz(),
+                _ => self.app.return_to_menu(),
+            }
             return;
         }
 
@@ -102,10 +106,30 @@ impl<'a> LearningManager<'a> {
             (KeyModifiers::NONE, KeyCode::Char('r')) | (KeyModifiers::NONE, KeyCode::Char('R')) => {
                 llm::trigger_learning_response(self.app)
             }
+            (KeyModifiers::NONE, KeyCode::Char('x')) | (KeyModifiers::NONE, KeyCode::Char('X')) => {
+                self.export_current_quiz()
+            }
             (KeyModifiers::NONE, KeyCode::Char('m')) => self.app.return_to_menu(),
             (KeyModifiers::NONE, KeyCode::Char('e')) => EventsManager::show_events(self.app),
             _ => {}
         }
+    }
+
+    fn export_current_quiz(&mut self) {
+        let Some(response) = self.app.learning_response.clone() else {
+            App::push_error(
+                &mut self.app.error,
+                "No quiz available to publish.".to_string(),
+            );
+            return;
+        };
+
+        let session_date = if self.app.active_quiz_session_date.trim().is_empty() {
+            self.app.session_date.clone()
+        } else {
+            self.app.active_quiz_session_date.clone()
+        };
+        document_repository::trigger_learning_export(self.app, response, session_date);
     }
 
     pub(crate) fn ensure_indices(&mut self) {
@@ -564,11 +588,13 @@ mod tests {
             ai_loading_start: None,
             ai_progress_percent: 0,
             ai_progress_message: String::new(),
+            ai_progress_timeline: Vec::new(),
             ai_result_receiver: None,
             ai_sender: None,
             document_export_receiver: None,
             document_export_loading: false,
             learning_response: Some(response),
+            active_quiz_session_date: String::new(),
             learning_group_index: 0,
             learning_quiz_index: 0,
             learning_option_index: 0,
@@ -602,6 +628,8 @@ mod tests {
             deep_dive_showing_history: false,
             library_artifacts: Vec::new(),
             library_selected: None,
+            skill_installer_selected_target: crate::EmbeddedSkillTarget::Codex,
+            learnchain_setup: crate::LearnChainSetupState::default(),
         }
     }
 
@@ -750,5 +778,25 @@ mod tests {
             manager.select_option();
         }
         assert_eq!(app.quiz_first_attempts.len(), 1);
+    }
+
+    #[test]
+    fn export_hotkey_surfaces_missing_repository_configuration() {
+        let response = load_learning_response("test_fixtures/single_knowledge_type_group.json");
+        let mut app = app_with_response(response);
+        app.active_quiz_session_date = "2026-03-12".to_string();
+
+        {
+            let mut manager = LearningManager::new(&mut app);
+            manager.handle_key(KeyEvent::from(KeyCode::Char('x')));
+        }
+
+        assert_eq!(
+            app.ai_status.as_deref(),
+            Some(
+                "No document repository is configured. Open Config and choose a repository first."
+            )
+        );
+        assert!(!app.document_export_loading);
     }
 }

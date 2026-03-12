@@ -18,7 +18,7 @@ impl<'a> ConfigManager<'a> {
     pub(crate) fn show_config(&mut self) {
         self.app.config_form = ConfigForm::from_config(config::current());
         self.app.config_form.set_status(
-            "Config is grouped by section. Use ↑/↓ to focus a setting, ←/→ to adjust selectors, and Enter to edit or act on the selected field.",
+            "Pick a section with ↑/↓, press → to move into steps, and use h/l or +/- to adjust the selected step.",
         );
         self.app.view = AppView::Config;
     }
@@ -37,17 +37,28 @@ impl<'a> ConfigManager<'a> {
             (KeyModifiers::NONE, KeyCode::Up | KeyCode::Char('k')) => {
                 self.app.config_form.select_previous();
             }
-            (KeyModifiers::NONE, KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('-')) => {
-                self.app.config_form.adjust_current(-1);
+            (KeyModifiers::NONE, KeyCode::Left) => {
+                self.app.config_form.focus_section_navigation();
             }
-            (
-                KeyModifiers::NONE,
-                KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('+') | KeyCode::Char('='),
-            ) => {
-                self.app.config_form.adjust_current(1);
+            (KeyModifiers::NONE, KeyCode::Right) => {
+                self.app.config_form.focus_step_navigation();
+            }
+            (KeyModifiers::NONE, KeyCode::Char('h') | KeyCode::Char('-')) => {
+                if self.app.config_form.is_step_navigation_focused() {
+                    self.app.config_form.adjust_current(-1);
+                }
+            }
+            (KeyModifiers::NONE, KeyCode::Char('l') | KeyCode::Char('+') | KeyCode::Char('=')) => {
+                if self.app.config_form.is_step_navigation_focused() {
+                    self.app.config_form.adjust_current(1);
+                }
             }
             (KeyModifiers::NONE, KeyCode::Enter) => {
-                // Start editing if a text field is selected, otherwise save
+                if self.app.config_form.is_section_navigation_focused() {
+                    self.app.config_form.focus_step_navigation();
+                    return;
+                }
+
                 match self.app.config_form.current_field() {
                     ConfigField::DocumentRepositoryTarget => {
                         self.app
@@ -78,9 +89,7 @@ impl<'a> ConfigManager<'a> {
                     ConfigField::OpenRouterModel => {
                         self.app.config_form.start_editing_openrouter_model();
                     }
-                    _ => {
-                        self.save_config_changes();
-                    }
+                    _ => self.app.config_form.adjust_current(1),
                 }
             }
             (KeyModifiers::NONE, KeyCode::Char('s')) => {
@@ -193,7 +202,10 @@ impl<'a> ConfigManager<'a> {
         } else if self.app.config_form.is_editing_learnchain_auth_code() {
             match key.code {
                 KeyCode::Esc => self.app.config_form.cancel_learnchain_auth_code_edit(),
-                KeyCode::Enter => self.app.config_form.apply_learnchain_auth_code_edit(),
+                KeyCode::Enter => {
+                    self.app.config_form.apply_learnchain_auth_code_edit();
+                    self.verify_learnchain_auth_code();
+                }
                 KeyCode::Backspace => self.app.config_form.backspace_learnchain_auth_code(),
                 KeyCode::Char(ch) => {
                     if !key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -253,6 +265,52 @@ impl<'a> ConfigManager<'a> {
         }
     }
 
+    fn verify_learnchain_auth_code(&mut self) {
+        if !self.app.config_form.is_learnchain_selected() {
+            return;
+        }
+
+        let site_url = self.app.config_form.learnchain_site_url.clone();
+        let auth_code = self.app.config_form.learnchain_auth_code.trim().to_string();
+        if auth_code.is_empty() {
+            return;
+        }
+
+        if let Err(err) = config::validate_learnchain_site_url(&site_url) {
+            self.app.config_form.mark_learnchain_auth_failure();
+            self.app.error = Some(err.clone());
+            self.app.config_form.set_status(err);
+            return;
+        }
+
+        match document_repository::exchange_learnchain_login_code(&site_url, &auth_code) {
+            Ok(session) => {
+                self.app.config_form.learnchain_email = session.account_label.clone();
+                self.app.config_form.learnchain_access_token = session.access_token;
+                self.app.config_form.learnchain_refresh_token = session.refresh_token;
+                self.app.config_form.learnchain_password.clear();
+                self.app.config_form.learnchain_auth_code.clear();
+                self.app.config_form.mark_learnchain_auth_success();
+                self.app.config_form.dirty = true;
+                self.app.error = None;
+                self.app.config_form.set_status(format!(
+                    "LearnChain authorization verified for {}. Press s to save.",
+                    if session.account_label.trim().is_empty() {
+                        "unknown account"
+                    } else {
+                        session.account_label.trim()
+                    }
+                ));
+            }
+            Err(err) => {
+                self.app.config_form.mark_learnchain_auth_failure();
+                let message = format!("LearnChain authorization failed: {}", err);
+                self.app.error = Some(message.clone());
+                self.app.config_form.set_status(message);
+            }
+        }
+    }
+
     fn save_config_changes(&mut self) {
         if !self.app.config_form.dirty {
             self.app
@@ -278,6 +336,8 @@ impl<'a> ConfigManager<'a> {
             self.app.config_form.learnchain_refresh_token.clone();
         let mut target_learnchain_password = self.app.config_form.learnchain_password.clone();
         let target_learnchain_auth_code = self.app.config_form.learnchain_auth_code.clone();
+        let attempted_learnchain_auth_exchange = self.app.config_form.is_learnchain_selected()
+            && !target_learnchain_auth_code.trim().is_empty();
         let target_provider = self.app.config_form.ai_provider;
         let target_openai_model = self.app.config_form.openai_model;
         let target_openai_key = self.app.config_form.openai_api_key.clone();
@@ -317,20 +377,21 @@ impl<'a> ConfigManager<'a> {
             return;
         }
 
-        if self.app.config_form.is_learnchain_selected()
-            && !target_learnchain_auth_code.trim().is_empty()
-        {
+        if attempted_learnchain_auth_exchange {
             match document_repository::exchange_learnchain_login_code(
                 &target_learnchain_site_url,
                 &target_learnchain_auth_code,
             ) {
                 Ok(session) => {
-                    target_learnchain_email = session.account_label;
-                    target_learnchain_access_token = session.access_token;
-                    target_learnchain_refresh_token = session.refresh_token;
-                    target_learnchain_password.clear();
+                    let mut session_config = config::AppConfig::default();
+                    document_repository::apply_learnchain_session(&mut session_config, &session);
+                    target_learnchain_email = session_config.learnchain_email;
+                    target_learnchain_access_token = session_config.learnchain_access_token;
+                    target_learnchain_refresh_token = session_config.learnchain_refresh_token;
+                    target_learnchain_password = session_config.learnchain_password;
                 }
                 Err(err) => {
+                    self.app.config_form.mark_learnchain_auth_failure();
                     App::push_error(
                         &mut self.app.error,
                         format!("LearnChain authorization failed: {}", err),
@@ -369,6 +430,9 @@ impl<'a> ConfigManager<'a> {
             Ok(updated) => {
                 self.app.config_form.apply_saved(updated);
                 self.app.reload_session_from_config();
+                if attempted_learnchain_auth_exchange {
+                    self.app.config_form.mark_learnchain_auth_success();
+                }
                 let resolved_llm = self.app.config_form.resolved_llm();
 
                 let status = if self.app.config_form.is_learnchain_selected()
@@ -388,9 +452,14 @@ impl<'a> ConfigManager<'a> {
                             self.app.config_form.learnchain_email.trim()
                         }
                     )
-                } else if resolved_llm.provider == config::AiProvider::CodexCli {
-                    "Saved • Provider: Codex CLI • Model: CLI default • Uses installed codex configuration"
-                        .to_string()
+                } else if matches!(
+                    resolved_llm.provider,
+                    config::AiProvider::CodexCli | config::AiProvider::ClaudeCodeCli
+                ) {
+                    format!(
+                        "Saved • Provider: {} • Model: CLI default • Uses installed CLI configuration",
+                        resolved_llm.provider.label()
+                    )
                 } else {
                     format!(
                         "Saved • Provider: {} • Model: {} • Key: {}",

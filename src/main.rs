@@ -1,3 +1,4 @@
+mod cli;
 mod config;
 mod document_repository;
 mod knowledge_store;
@@ -11,10 +12,11 @@ mod session_sources;
 mod ui_renderer;
 mod view_managers;
 
+use cli::{CliAction, CommandAction};
 use color_eyre::Result;
 use config::ConfigForm;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use document_repository::{RepositoryExportResult, poll_export_messages};
+use document_repository::{LearnChainStoredSession, RepositoryExportResult, poll_export_messages};
 use dotenvy::dotenv;
 use knowledge_store::KnowledgeAnalytics;
 use llm::{
@@ -24,7 +26,7 @@ use llm::{
 use output_manager::{LibraryArtifactEntry, OutputManager};
 use ratatui::{DefaultTerminal, Frame};
 use session_manager::SessionManager;
-use session_sources::{CodexCliSource, Session, SessionEvent, SessionLoad};
+use session_sources::{Session, SessionEvent, SessionLoad};
 use std::{
     collections::HashSet,
     env, fs,
@@ -34,56 +36,24 @@ use std::{
 };
 use ui_renderer::UiRenderer;
 use view_managers::{
-    AnalyticsManager, ConfigManager, DeepDiveManager, LearningManager, LibraryManager, MenuManager,
-    SessionPickerManager,
+    AnalyticsManager, ConfigManager, DeepDiveManager, LearnChainSetupManager, LearningManager,
+    LibraryManager, MenuManager, SessionPickerManager, SkillInstallerManager,
 };
 
 pub(crate) const AI_LOADING_FRAMES: [&str; 4] = ["-", "\\", "|", "/"];
-const CODEX_SKILL_NAME: &str = "learnchain-deep-dive";
+const EMBEDDED_SKILL_NAME: &str = "learnchain-deep-dive";
 const EMBEDDED_CODEX_SKILL: &str =
     include_str!("../assets/codex-skills/learnchain-deep-dive/SKILL.md");
 const EMBEDDED_CODEX_SKILL_OPENAI_YAML: &str =
     include_str!("../assets/codex-skills/learnchain-deep-dive/agents/openai.yaml");
-const HELP_TEXT: &str = "learnchain options:\n  --debug, -d               write runtime debug logs to output/learnchain-debug.log\n  --set-openai-key <key>    store your OpenAI API key\n  --clear-openai-key        remove the stored OpenAI API key\n  --set-anthropic-key <key> store your Anthropic API key\n  --clear-anthropic-key     remove the stored Anthropic API key\n  --set-openrouter-key <key> store your OpenRouter API key\n  --clear-openrouter-key    remove the stored OpenRouter API key\n  --set-document-repository <none|notion|learnchain>\n                           store the selected document repository\n  --clear-document-repository\n                           clear the selected document repository and target\n  --set-document-repository-target <target>\n                           store the document repository target\n  --clear-document-repository-target\n                           remove the stored document repository target\n  --set-notion-api-token <token>\n                           store the Notion API token for Notion exports\n  --clear-notion-api-token\n                           remove the stored Notion API token\n  --set-learnchain-site-url <url>\n                           store the LearnChain site URL (for example http://localhost:3000)\n  --clear-learnchain-site-url\n                           reset the LearnChain site URL to its default\n  --set-learnchain-email <email>\n                           store the LearnChain email used for document upload\n  --clear-learnchain-email\n                           remove the stored LearnChain email\n  --set-learnchain-password <password>\n                           store the LearnChain password used for document upload\n  --clear-learnchain-password\n                           remove the stored LearnChain password\n  --generate-codex-deep-dive\n                           generate a deep dive for the current or specified Codex session\n  --codex-thread-id <id>\n                           target a specific Codex session id with --generate-codex-deep-dive\n  --export-to-document-repository\n                           export the generated Codex deep dive to the configured document repository\n  --print-codex-deep-dive-action\n                           print a copy/paste Codex custom command template\n  --install-codex-deep-dive-skill\n                           install the bundled LearnChain Codex skill into your Codex skills folder\n  --help                    show this message\n  --version                 show version";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CliCommand {
-    SetOpenAiKey(String),
-    ClearOpenAiKey,
-    SetAnthropicKey(String),
-    ClearAnthropicKey,
-    SetOpenRouterKey(String),
-    ClearOpenRouterKey,
-    SetDocumentRepository(config::DocumentRepositoryKind),
-    ClearDocumentRepository,
-    SetDocumentRepositoryTarget(String),
-    ClearDocumentRepositoryTarget,
-    SetNotionApiToken(String),
-    ClearNotionApiToken,
-    SetLearnChainSiteUrl(String),
-    ClearLearnChainSiteUrl,
-    SetLearnChainEmail(String),
-    ClearLearnChainEmail,
-    SetLearnChainPassword(String),
-    ClearLearnChainPassword,
-    GenerateCodexDeepDive,
-    PrintCodexDeepDiveAction,
-    InstallCodexDeepDiveSkill,
-    Help,
-    Version,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct CliOptions {
-    debug_logging: bool,
-    codex_thread_id: Option<String>,
-    export_document_repository: bool,
-    command: Option<CliCommand>,
-}
+const EMBEDDED_CLAUDE_SKILL: &str =
+    include_str!("../assets/claude-skills/learnchain-deep-dive/SKILL.md");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AppView {
     Menu,
+    LearnChainSetup,
+    SkillInstaller,
     Events,
     SessionPicker,
     Learning,
@@ -100,6 +70,97 @@ pub(crate) enum SessionSelectionTarget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EmbeddedSkillTarget {
+    Codex,
+    ClaudeCode,
+}
+
+impl EmbeddedSkillTarget {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::ClaudeCode => "Claude Code",
+        }
+    }
+
+    pub(crate) fn installation_label(self) -> &'static str {
+        match self {
+            Self::Codex => "LearnChain Codex skill",
+            Self::ClaudeCode => "LearnChain Claude Code skill",
+        }
+    }
+
+    fn root(self) -> color_eyre::Result<PathBuf> {
+        match self {
+            Self::Codex => codex_skills_root(),
+            Self::ClaudeCode => claude_skills_root(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LearnChainSetupStep {
+    Account,
+    Authenticate,
+    Success,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LearnChainSetupAuthMethod {
+    EmailPassword,
+    CliAuthCode,
+}
+
+impl LearnChainSetupAuthMethod {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::EmailPassword => "Email + password",
+            Self::CliAuthCode => "CLI auth code",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LearnChainSetupField {
+    AuthMethod,
+    Email,
+    Password,
+    AuthCode,
+    Submit,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LearnChainSetupState {
+    pub(crate) step: LearnChainSetupStep,
+    pub(crate) auth_method: LearnChainSetupAuthMethod,
+    pub(crate) field: LearnChainSetupField,
+    pub(crate) email_input: String,
+    pub(crate) password_input: String,
+    pub(crate) auth_code_input: String,
+    pub(crate) status: Option<String>,
+    pub(crate) error: Option<String>,
+    pub(crate) success_account_label: String,
+    pub(crate) confetti_frame: usize,
+}
+
+impl Default for LearnChainSetupState {
+    fn default() -> Self {
+        Self {
+            step: LearnChainSetupStep::Account,
+            auth_method: LearnChainSetupAuthMethod::EmailPassword,
+            field: LearnChainSetupField::AuthMethod,
+            email_input: String::new(),
+            password_input: String::new(),
+            auth_code_input: String::new(),
+            status: None,
+            error: None,
+            success_account_label: String::new(),
+            confetti_frame: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AiTaskKind {
     LearningLesson,
     SessionDeepDive,
@@ -111,6 +172,14 @@ pub(crate) enum AiTaskMessage {
     DeepDiveSuccess(DeepDiveGenerationResult),
     Error(AiTaskKind, String),
     Progress(AiTaskKind, String, u8), // (kind, message, percentage)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AiProgressStep {
+    pub(crate) message: String,
+    pub(crate) percent: u8,
+    pub(crate) started_at_secs: u64,
+    pub(crate) completed_at_secs: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -130,14 +199,7 @@ pub(crate) fn reset_learning_feedback(
 }
 
 fn main() -> color_eyre::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    let cli = match parse_cli_options(&args[1..]) {
-        Ok(cli) => cli,
-        Err(message) => {
-            eprintln!("{}", message);
-            std::process::exit(1);
-        }
-    };
+    let cli = cli::parse();
 
     if cli.debug_logging {
         let log_path = log_util::enable_runtime_debug_logging()?;
@@ -145,46 +207,44 @@ fn main() -> color_eyre::Result<()> {
         log_util::log_debug("App: runtime debug logging enabled via CLI flag");
     }
 
-    let codex_thread_id = cli.codex_thread_id.clone();
-    let export_document_repository = cli.export_document_repository;
-    if let Some(command) = cli.command {
+    if let CliAction::Execute(command) = cli.action {
         match command {
-            CliCommand::SetOpenAiKey(key) => {
+            CommandAction::SetOpenAiKey(key) => {
                 config::update(|cfg| cfg.openai_api_key = key.trim().to_string())?;
                 println!("Stored OpenAI API key in config/app_config.toml.");
                 return Ok(());
             }
-            CliCommand::ClearOpenAiKey => {
+            CommandAction::ClearOpenAiKey => {
                 config::update(|cfg| cfg.openai_api_key.clear())?;
                 println!("Cleared OpenAI API key from config/app_config.toml.");
                 return Ok(());
             }
-            CliCommand::SetAnthropicKey(key) => {
+            CommandAction::SetAnthropicKey(key) => {
                 config::update(|cfg| cfg.anthropic_api_key = key.trim().to_string())?;
                 println!("Stored Anthropic API key in config/app_config.toml.");
                 return Ok(());
             }
-            CliCommand::ClearAnthropicKey => {
+            CommandAction::ClearAnthropicKey => {
                 config::update(|cfg| cfg.anthropic_api_key.clear())?;
                 println!("Cleared Anthropic API key from config/app_config.toml.");
                 return Ok(());
             }
-            CliCommand::SetOpenRouterKey(key) => {
+            CommandAction::SetOpenRouterKey(key) => {
                 config::update(|cfg| cfg.openrouter_api_key = key.trim().to_string())?;
                 println!("Stored OpenRouter API key in config/app_config.toml.");
                 return Ok(());
             }
-            CliCommand::ClearOpenRouterKey => {
+            CommandAction::ClearOpenRouterKey => {
                 config::update(|cfg| cfg.openrouter_api_key.clear())?;
                 println!("Cleared OpenRouter API key from config/app_config.toml.");
                 return Ok(());
             }
-            CliCommand::SetDocumentRepository(repository) => {
+            CommandAction::SetDocumentRepository(repository) => {
                 config::update(|cfg| cfg.document_repository = repository)?;
                 println!("Stored document repository in config/app_config.toml.");
                 return Ok(());
             }
-            CliCommand::ClearDocumentRepository => {
+            CommandAction::ClearDocumentRepository => {
                 config::update(|cfg| {
                     cfg.document_repository = config::DocumentRepositoryKind::None;
                     cfg.document_repository_target.clear();
@@ -192,7 +252,7 @@ fn main() -> color_eyre::Result<()> {
                 println!("Cleared document repository from config/app_config.toml.");
                 return Ok(());
             }
-            CliCommand::SetDocumentRepositoryTarget(target) => {
+            CommandAction::SetDocumentRepositoryTarget(target) => {
                 let trimmed = target.trim().to_string();
                 let current = config::current();
                 config::validate_document_repository_target(current.document_repository, &trimmed)
@@ -201,56 +261,62 @@ fn main() -> color_eyre::Result<()> {
                 println!("Stored document repository target in config/app_config.toml.");
                 return Ok(());
             }
-            CliCommand::ClearDocumentRepositoryTarget => {
+            CommandAction::ClearDocumentRepositoryTarget => {
                 config::update(|cfg| cfg.document_repository_target.clear())?;
                 println!("Cleared document repository target from config/app_config.toml.");
                 return Ok(());
             }
-            CliCommand::SetNotionApiToken(token) => {
+            CommandAction::SetNotionApiToken(token) => {
                 config::update(|cfg| cfg.notion_api_token = token.trim().to_string())?;
                 println!("Stored Notion API token in config/app_config.toml.");
                 return Ok(());
             }
-            CliCommand::ClearNotionApiToken => {
+            CommandAction::ClearNotionApiToken => {
                 config::update(|cfg| cfg.notion_api_token.clear())?;
                 println!("Cleared Notion API token from config/app_config.toml.");
                 return Ok(());
             }
-            CliCommand::SetLearnChainSiteUrl(url) => {
+            CommandAction::SetLearnChainSiteUrl(url) => {
                 config::validate_learnchain_site_url(&url)
                     .map_err(|err| color_eyre::eyre::eyre!(err))?;
                 config::update(|cfg| cfg.learnchain_site_url = url.trim().to_string())?;
                 println!("Stored LearnChain site URL in config/app_config.toml.");
                 return Ok(());
             }
-            CliCommand::ClearLearnChainSiteUrl => {
+            CommandAction::ClearLearnChainSiteUrl => {
                 config::update(|cfg| cfg.learnchain_site_url.clear())?;
                 println!("Reset LearnChain site URL in config/app_config.toml.");
                 return Ok(());
             }
-            CliCommand::SetLearnChainEmail(email) => {
+            CommandAction::SetLearnChainEmail(email) => {
                 config::update(|cfg| cfg.learnchain_email = email.trim().to_string())?;
                 println!("Stored LearnChain email in config/app_config.toml.");
                 return Ok(());
             }
-            CliCommand::ClearLearnChainEmail => {
+            CommandAction::ClearLearnChainEmail => {
                 config::update(|cfg| cfg.learnchain_email.clear())?;
                 println!("Cleared LearnChain email from config/app_config.toml.");
                 return Ok(());
             }
-            CliCommand::SetLearnChainPassword(password) => {
+            CommandAction::SetLearnChainPassword(password) => {
                 config::update(|cfg| cfg.learnchain_password = password.clone())?;
                 println!("Stored LearnChain password in config/app_config.toml.");
                 return Ok(());
             }
-            CliCommand::ClearLearnChainPassword => {
+            CommandAction::ClearLearnChainPassword => {
                 config::update(|cfg| cfg.learnchain_password.clear())?;
                 println!("Cleared LearnChain password from config/app_config.toml.");
                 return Ok(());
             }
-            CliCommand::GenerateCodexDeepDive => {
-                if let Err(message) = run_codex_deep_dive_command(
-                    codex_thread_id.as_deref(),
+            CommandAction::GenerateCodexDeepDive {
+                thread_id,
+                context,
+                export_document_repository,
+            } => {
+                if let Err(message) = run_agent_deep_dive_command(
+                    config::SessionSourceKind::Codex,
+                    thread_id.as_deref(),
+                    context.as_deref(),
                     export_document_repository,
                 ) {
                     eprintln!("{}", message);
@@ -258,11 +324,27 @@ fn main() -> color_eyre::Result<()> {
                 }
                 return Ok(());
             }
-            CliCommand::PrintCodexDeepDiveAction => {
+            CommandAction::GenerateClaudeDeepDive {
+                session_id,
+                context,
+                export_document_repository,
+            } => {
+                if let Err(message) = run_agent_deep_dive_command(
+                    config::SessionSourceKind::ClaudeCode,
+                    session_id.as_deref(),
+                    context.as_deref(),
+                    export_document_repository,
+                ) {
+                    eprintln!("{}", message);
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
+            CommandAction::PrintCodexDeepDiveAction => {
                 println!("{}", codex_deep_dive_action_template());
                 return Ok(());
             }
-            CliCommand::InstallCodexDeepDiveSkill => {
+            CommandAction::InstallCodexDeepDiveSkill => {
                 let installed_path = install_embedded_codex_skill_default()?;
                 println!(
                     "Installed LearnChain Codex skill to {}\nRestart Codex to pick up new skills.",
@@ -270,12 +352,12 @@ fn main() -> color_eyre::Result<()> {
                 );
                 return Ok(());
             }
-            CliCommand::Help => {
-                println!("{}", HELP_TEXT);
-                return Ok(());
-            }
-            CliCommand::Version => {
-                println!("learnchain {}", env!("CARGO_PKG_VERSION"));
+            CommandAction::InstallClaudeDeepDiveSkill => {
+                let installed_path = install_embedded_claude_skill_default()?;
+                println!(
+                    "Installed LearnChain Claude Code skill to {}\nRestart Claude Code to pick up new skills.",
+                    installed_path.display()
+                );
                 return Ok(());
             }
         }
@@ -293,13 +375,15 @@ fn main() -> color_eyre::Result<()> {
 }
 
 #[derive(Debug, Clone)]
-struct CodexSessionResolution {
+struct DeepDiveSessionResolution {
     session: Session,
     fallback_note: Option<String>,
 }
 
-fn run_codex_deep_dive_command(
-    explicit_thread_id: Option<&str>,
+fn run_agent_deep_dive_command(
+    session_source: config::SessionSourceKind,
+    explicit_session_id: Option<&str>,
+    deep_dive_context: Option<&str>,
     export_document_repository: bool,
 ) -> std::result::Result<(), String> {
     config::initialize().map_err(|err| format!("Failed to load configuration: {}", err))?;
@@ -318,17 +402,31 @@ fn run_codex_deep_dive_command(
         }
     })?;
 
-    let source = CodexCliSource::default();
-    let resolution = resolve_codex_session(&source, explicit_thread_id)?;
+    let manager = SessionManager::from_source(session_source);
+    let sessions = manager.load_all_sessions();
+    let env_session_id = if session_source == config::SessionSourceKind::Codex {
+        std::env::var("CODEX_THREAD_ID").ok()
+    } else {
+        None
+    };
+    let resolution = resolve_deep_dive_session(
+        session_source,
+        sessions.sessions,
+        sessions.error,
+        explicit_session_id,
+        env_session_id.as_deref(),
+    )?;
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|err| format!("Failed to build Tokio runtime: {}", err))?;
+    let source_label = resolution.session.source_label.clone();
     let result = runtime
         .block_on(llm::deep_dive::generate_deep_dive_with_progress(
             &backend,
-            "Codex CLI",
+            &source_label,
             resolution.session,
             app_config.deep_dive_sections.clone(),
             app_config.min_quiz_questions,
+            deep_dive_context,
             None,
         ))
         .map_err(|err| err.to_string())?;
@@ -354,7 +452,7 @@ fn run_codex_deep_dive_command(
 
     println!(
         "{}",
-        format_codex_deep_dive_success(
+        format_deep_dive_success(
             &result,
             resolution.fallback_note.as_deref(),
             export_result.as_ref(),
@@ -363,51 +461,101 @@ fn run_codex_deep_dive_command(
     Ok(())
 }
 
-fn resolve_codex_session(
-    source: &CodexCliSource,
-    explicit_thread_id: Option<&str>,
-) -> std::result::Result<CodexSessionResolution, String> {
-    if let Some(thread_id) = explicit_thread_id.filter(|value| !value.trim().is_empty()) {
-        let session = source.load_session_by_id(thread_id)?;
-        return Ok(CodexSessionResolution {
+fn resolve_deep_dive_session(
+    session_source: config::SessionSourceKind,
+    mut sessions: Vec<Session>,
+    load_error: Option<String>,
+    explicit_session_id: Option<&str>,
+    env_session_id: Option<&str>,
+) -> std::result::Result<DeepDiveSessionResolution, String> {
+    sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+    if let Some(session_id) = explicit_session_id.filter(|value| !value.trim().is_empty()) {
+        let session = sessions
+            .iter()
+            .find(|session| session.id == session_id.trim())
+            .cloned()
+            .ok_or_else(|| missing_session_error(session_source, session_id, load_error))?;
+        return Ok(DeepDiveSessionResolution {
             session,
             fallback_note: None,
         });
     }
 
-    if let Ok(thread_id) = std::env::var("CODEX_THREAD_ID") {
-        let trimmed = thread_id.trim();
-        if !trimmed.is_empty() {
-            match source.load_session_by_id(trimmed) {
-                Ok(session) => {
-                    return Ok(CodexSessionResolution {
-                        session,
-                        fallback_note: None,
-                    });
-                }
-                Err(err) if err.contains("No Codex session file matched session id") => {
-                    let session = source.load_latest_session()?;
-                    return Ok(CodexSessionResolution {
-                        session,
-                        fallback_note: Some(format!(
-                            "Note: CODEX_THREAD_ID '{}' was not found on disk, so LearnChain used the most recent Codex session instead.",
-                            trimmed
-                        )),
-                    });
-                }
-                Err(err) => return Err(err),
-            }
+    if session_source == config::SessionSourceKind::Codex
+        && let Some(thread_id) = env_session_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    {
+        if let Some(session) = sessions
+            .iter()
+            .find(|session| session.id == thread_id)
+            .cloned()
+        {
+            return Ok(DeepDiveSessionResolution {
+                session,
+                fallback_note: None,
+            });
         }
+
+        let session = sessions
+            .first()
+            .cloned()
+            .ok_or_else(|| missing_latest_session_error(session_source, load_error.clone()))?;
+        return Ok(DeepDiveSessionResolution {
+            session,
+            fallback_note: Some(format!(
+                "Note: CODEX_THREAD_ID '{}' was not found on disk, so LearnChain used the most recent Codex session instead.",
+                thread_id
+            )),
+        });
     }
 
-    let session = source.load_latest_session()?;
-    Ok(CodexSessionResolution {
+    let session = sessions
+        .first()
+        .cloned()
+        .ok_or_else(|| missing_latest_session_error(session_source, load_error))?;
+    Ok(DeepDiveSessionResolution {
         session,
         fallback_note: None,
     })
 }
 
-fn format_codex_deep_dive_success(
+fn missing_session_error(
+    session_source: config::SessionSourceKind,
+    session_id: &str,
+    load_error: Option<String>,
+) -> String {
+    match load_error {
+        Some(error) => format!(
+            "No {} session matched session id '{}'. {}",
+            session_source.label(),
+            session_id.trim(),
+            error
+        ),
+        None => format!(
+            "No {} session matched session id '{}'.",
+            session_source.label(),
+            session_id.trim()
+        ),
+    }
+}
+
+fn missing_latest_session_error(
+    session_source: config::SessionSourceKind,
+    load_error: Option<String>,
+) -> String {
+    match load_error {
+        Some(error) => format!(
+            "No {} sessions were found. {}",
+            session_source.label(),
+            error
+        ),
+        None => format!("No {} sessions were found.", session_source.label()),
+    }
+}
+
+fn format_deep_dive_success(
     result: &DeepDiveGenerationResult,
     fallback_note: Option<&str>,
     export_result: Option<&RepositoryExportResult>,
@@ -451,6 +599,15 @@ fn format_codex_deep_dive_success(
     lines.join("\n")
 }
 
+#[allow(dead_code)]
+fn format_codex_deep_dive_success(
+    result: &DeepDiveGenerationResult,
+    fallback_note: Option<&str>,
+    export_result: Option<&RepositoryExportResult>,
+) -> String {
+    format_deep_dive_success(result, fallback_note, export_result)
+}
+
 fn codex_deep_dive_action_template() -> &'static str {
     r#"Codex custom command template
 
@@ -458,7 +615,8 @@ Name: /learnchain-deep-dive
 Description: Generate a LearnChain deep dive for the current Codex session.
 
 Prompt:
-Run `learnchain --generate-codex-deep-dive --codex-thread-id "$CODEX_THREAD_ID"` from the workspace root.
+Run `learnchain deep-dive generate codex --thread-id "$CODEX_THREAD_ID"` from the workspace root.
+If the user requests a specific angle, append `--context "<requested focus>"`.
 
 If the command succeeds, respond with:
 - the saved path
@@ -470,20 +628,51 @@ If the command fails, surface the LearnChain error exactly as written, including
 }
 
 fn install_embedded_codex_skill_default() -> color_eyre::Result<PathBuf> {
-    let root = codex_skills_root()?;
-    install_embedded_codex_skill_at(&root)
+    install_embedded_skill_default(EmbeddedSkillTarget::Codex)
 }
 
+#[allow(dead_code)]
 fn install_embedded_codex_skill_at(root: &Path) -> color_eyre::Result<PathBuf> {
-    let skill_dir = root.join(CODEX_SKILL_NAME);
-    let agents_dir = skill_dir.join("agents");
+    install_embedded_skill_at(EmbeddedSkillTarget::Codex, root)
+}
 
-    fs::create_dir_all(&agents_dir)?;
-    fs::write(skill_dir.join("SKILL.md"), EMBEDDED_CODEX_SKILL)?;
-    fs::write(
-        agents_dir.join("openai.yaml"),
-        EMBEDDED_CODEX_SKILL_OPENAI_YAML,
-    )?;
+fn install_embedded_claude_skill_default() -> color_eyre::Result<PathBuf> {
+    install_embedded_skill_default(EmbeddedSkillTarget::ClaudeCode)
+}
+
+#[allow(dead_code)]
+fn install_embedded_claude_skill_at(root: &Path) -> color_eyre::Result<PathBuf> {
+    install_embedded_skill_at(EmbeddedSkillTarget::ClaudeCode, root)
+}
+
+pub(crate) fn install_embedded_skill_default(
+    target: EmbeddedSkillTarget,
+) -> color_eyre::Result<PathBuf> {
+    let root = target.root()?;
+    install_embedded_skill_at(target, &root)
+}
+
+fn install_embedded_skill_at(
+    target: EmbeddedSkillTarget,
+    root: &Path,
+) -> color_eyre::Result<PathBuf> {
+    let skill_dir = root.join(EMBEDDED_SKILL_NAME);
+
+    fs::create_dir_all(&skill_dir)?;
+    match target {
+        EmbeddedSkillTarget::Codex => {
+            let agents_dir = skill_dir.join("agents");
+            fs::create_dir_all(&agents_dir)?;
+            fs::write(skill_dir.join("SKILL.md"), EMBEDDED_CODEX_SKILL)?;
+            fs::write(
+                agents_dir.join("openai.yaml"),
+                EMBEDDED_CODEX_SKILL_OPENAI_YAML,
+            )?;
+        }
+        EmbeddedSkillTarget::ClaudeCode => {
+            fs::write(skill_dir.join("SKILL.md"), EMBEDDED_CLAUDE_SKILL)?;
+        }
+    }
 
     Ok(skill_dir)
 }
@@ -506,216 +695,18 @@ fn codex_skills_root() -> color_eyre::Result<PathBuf> {
     ))
 }
 
-fn parse_cli_options(args: &[String]) -> std::result::Result<CliOptions, String> {
-    let mut options = CliOptions::default();
-    let mut index = 0;
-
-    while index < args.len() {
-        match args[index].as_str() {
-            "--debug" | "-d" => {
-                options.debug_logging = true;
-                index += 1;
-            }
-            "--set-openai-key" => {
-                let key = args
-                    .get(index + 1)
-                    .ok_or_else(|| "Usage: learnchain --set-openai-key <key>".to_string())?;
-                set_command(&mut options.command, CliCommand::SetOpenAiKey(key.clone()))?;
-                index += 2;
-            }
-            "--clear-openai-key" => {
-                set_command(&mut options.command, CliCommand::ClearOpenAiKey)?;
-                index += 1;
-            }
-            "--set-anthropic-key" => {
-                let key = args
-                    .get(index + 1)
-                    .ok_or_else(|| "Usage: learnchain --set-anthropic-key <key>".to_string())?;
-                set_command(
-                    &mut options.command,
-                    CliCommand::SetAnthropicKey(key.clone()),
-                )?;
-                index += 2;
-            }
-            "--clear-anthropic-key" => {
-                set_command(&mut options.command, CliCommand::ClearAnthropicKey)?;
-                index += 1;
-            }
-            "--set-openrouter-key" => {
-                let key = args
-                    .get(index + 1)
-                    .ok_or_else(|| "Usage: learnchain --set-openrouter-key <key>".to_string())?;
-                set_command(
-                    &mut options.command,
-                    CliCommand::SetOpenRouterKey(key.clone()),
-                )?;
-                index += 2;
-            }
-            "--clear-openrouter-key" => {
-                set_command(&mut options.command, CliCommand::ClearOpenRouterKey)?;
-                index += 1;
-            }
-            "--set-document-repository" => {
-                let repository = args.get(index + 1).ok_or_else(|| {
-                    "Usage: learnchain --set-document-repository <none|notion|learnchain>"
-                        .to_string()
-                })?;
-                let repository =
-                    config::DocumentRepositoryKind::parse(repository).ok_or_else(|| {
-                        "Document repository must be one of: none, notion, learnchain.".to_string()
-                    })?;
-                set_command(
-                    &mut options.command,
-                    CliCommand::SetDocumentRepository(repository),
-                )?;
-                index += 2;
-            }
-            "--clear-document-repository" => {
-                set_command(&mut options.command, CliCommand::ClearDocumentRepository)?;
-                index += 1;
-            }
-            "--set-document-repository-target" => {
-                let target = args.get(index + 1).ok_or_else(|| {
-                    "Usage: learnchain --set-document-repository-target <target>".to_string()
-                })?;
-                set_command(
-                    &mut options.command,
-                    CliCommand::SetDocumentRepositoryTarget(target.clone()),
-                )?;
-                index += 2;
-            }
-            "--clear-document-repository-target" => {
-                set_command(
-                    &mut options.command,
-                    CliCommand::ClearDocumentRepositoryTarget,
-                )?;
-                index += 1;
-            }
-            "--set-notion-api-token" => {
-                let token = args.get(index + 1).ok_or_else(|| {
-                    "Usage: learnchain --set-notion-api-token <token>".to_string()
-                })?;
-                set_command(
-                    &mut options.command,
-                    CliCommand::SetNotionApiToken(token.clone()),
-                )?;
-                index += 2;
-            }
-            "--clear-notion-api-token" => {
-                set_command(&mut options.command, CliCommand::ClearNotionApiToken)?;
-                index += 1;
-            }
-            "--set-learnchain-site-url" => {
-                let url = args.get(index + 1).ok_or_else(|| {
-                    "Usage: learnchain --set-learnchain-site-url <url>".to_string()
-                })?;
-                set_command(
-                    &mut options.command,
-                    CliCommand::SetLearnChainSiteUrl(url.clone()),
-                )?;
-                index += 2;
-            }
-            "--clear-learnchain-site-url" => {
-                set_command(&mut options.command, CliCommand::ClearLearnChainSiteUrl)?;
-                index += 1;
-            }
-            "--set-learnchain-email" => {
-                let email = args.get(index + 1).ok_or_else(|| {
-                    "Usage: learnchain --set-learnchain-email <email>".to_string()
-                })?;
-                set_command(
-                    &mut options.command,
-                    CliCommand::SetLearnChainEmail(email.clone()),
-                )?;
-                index += 2;
-            }
-            "--clear-learnchain-email" => {
-                set_command(&mut options.command, CliCommand::ClearLearnChainEmail)?;
-                index += 1;
-            }
-            "--set-learnchain-password" => {
-                let password = args.get(index + 1).ok_or_else(|| {
-                    "Usage: learnchain --set-learnchain-password <password>".to_string()
-                })?;
-                set_command(
-                    &mut options.command,
-                    CliCommand::SetLearnChainPassword(password.clone()),
-                )?;
-                index += 2;
-            }
-            "--clear-learnchain-password" => {
-                set_command(&mut options.command, CliCommand::ClearLearnChainPassword)?;
-                index += 1;
-            }
-            "--generate-codex-deep-dive" => {
-                set_command(&mut options.command, CliCommand::GenerateCodexDeepDive)?;
-                index += 1;
-            }
-            "--codex-thread-id" => {
-                let thread_id = args
-                    .get(index + 1)
-                    .ok_or_else(|| "Usage: learnchain --codex-thread-id <id>".to_string())?;
-                options.codex_thread_id = Some(thread_id.clone());
-                index += 2;
-            }
-            "--export-to-document-repository" => {
-                options.export_document_repository = true;
-                index += 1;
-            }
-            "--print-codex-deep-dive-action" => {
-                set_command(&mut options.command, CliCommand::PrintCodexDeepDiveAction)?;
-                index += 1;
-            }
-            "--install-codex-deep-dive-skill" => {
-                set_command(&mut options.command, CliCommand::InstallCodexDeepDiveSkill)?;
-                index += 1;
-            }
-            "--help" | "-h" => {
-                set_command(&mut options.command, CliCommand::Help)?;
-                index += 1;
-            }
-            "--version" | "-V" => {
-                set_command(&mut options.command, CliCommand::Version)?;
-                index += 1;
-            }
-            value => {
-                return Err(format!(
-                    "Unrecognized option '{}'. Run `learnchain --help` for usage.",
-                    value
-                ));
-            }
-        }
+fn claude_skills_root() -> color_eyre::Result<PathBuf> {
+    if let Some(home) = env::var_os("HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(home).join(".claude").join("skills"));
     }
 
-    if options.codex_thread_id.is_some()
-        && options.command != Some(CliCommand::GenerateCodexDeepDive)
-    {
-        return Err(
-            "`--codex-thread-id` can only be used with `--generate-codex-deep-dive`.".to_string(),
-        );
+    if let Some(user_profile) = env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(user_profile).join(".claude").join("skills"));
     }
 
-    if options.export_document_repository
-        && options.command != Some(CliCommand::GenerateCodexDeepDive)
-    {
-        return Err(
-            "`--export-to-document-repository` can only be used with `--generate-codex-deep-dive`."
-                .to_string(),
-        );
-    }
-
-    Ok(options)
-}
-
-fn set_command(
-    slot: &mut Option<CliCommand>,
-    command: CliCommand,
-) -> std::result::Result<(), String> {
-    if slot.is_some() {
-        return Err("Multiple commands are not supported in a single invocation.".to_string());
-    }
-    *slot = Some(command);
-    Ok(())
+    Err(color_eyre::eyre::eyre!(
+        "Could not determine Claude home directory. Set HOME and retry."
+    ))
 }
 
 /// The main application which holds the state and logic of the application.
@@ -769,6 +760,8 @@ pub struct App {
     pub(crate) ai_progress_percent: u8,
     /// Current progress stage message.
     pub(crate) ai_progress_message: String,
+    /// Timeline of AI progress steps completed so far and the active step.
+    pub(crate) ai_progress_timeline: Vec<AiProgressStep>,
     /// Receives background AI task updates.
     pub(crate) ai_result_receiver: Option<Receiver<AiTaskMessage>>,
     /// Sends background AI task updates from spawned workers.
@@ -779,6 +772,8 @@ pub struct App {
     pub(crate) document_export_loading: bool,
     /// Cached learning response from the most recent AI generation.
     pub(crate) learning_response: Option<StructuredLearningResponse>,
+    /// Session date associated with the active quiz, including library-loaded artifacts.
+    pub(crate) active_quiz_session_date: String,
     /// Index of the currently selected knowledge group within the learning response.
     pub(crate) learning_group_index: usize,
     /// Index of the currently selected quiz item within the active knowledge group.
@@ -845,6 +840,10 @@ pub struct App {
     pub(crate) library_artifacts: Vec<LibraryArtifactEntry>,
     /// Selected row within the library view.
     pub(crate) library_selected: Option<usize>,
+    /// Selected skill target within the installer chooser.
+    pub(crate) skill_installer_selected_target: EmbeddedSkillTarget,
+    /// In-progress LearnChain first-time setup flow state.
+    pub(crate) learnchain_setup: LearnChainSetupState,
 }
 
 /// Stores the result of a single quiz question for the summary screen.
@@ -1005,11 +1004,13 @@ impl App {
             ai_loading_start: None,
             ai_progress_percent: 0,
             ai_progress_message: String::new(),
+            ai_progress_timeline: Vec::new(),
             ai_result_receiver: None,
             ai_sender: None,
             document_export_receiver: None,
             document_export_loading: false,
             learning_response: None,
+            active_quiz_session_date: String::new(),
             learning_group_index: 0,
             learning_quiz_index: 0,
             learning_option_index: 0,
@@ -1043,6 +1044,8 @@ impl App {
             deep_dive_showing_history: false,
             library_artifacts: Vec::new(),
             library_selected: None,
+            skill_installer_selected_target: EmbeddedSkillTarget::Codex,
+            learnchain_setup: LearnChainSetupState::default(),
         };
 
         app.apply_session_load(session_load);
@@ -1114,6 +1117,7 @@ impl App {
         self.openai_model = config_snapshot.openai_model;
         self.anthropic_model = config_snapshot.anthropic_model;
         self.openrouter_model = config_snapshot.openrouter_model.clone();
+        self.config_form = ConfigForm::from_config(config_snapshot.clone());
         let resolved_llm = config_snapshot.resolved_llm();
 
         match LlmBackend::from_config(resolved_llm, "output") {
@@ -1163,17 +1167,32 @@ impl App {
             self.ai_loading_frame = (self.ai_loading_frame + 1) % AI_LOADING_FRAMES.len();
             self.update_loading_status();
         }
+        if matches!(self.view, AppView::LearnChainSetup)
+            && self.learnchain_setup.step == LearnChainSetupStep::Success
+        {
+            self.learnchain_setup.confetti_frame =
+                self.learnchain_setup.confetti_frame.wrapping_add(1);
+        }
         poll_ai_messages(self);
         poll_export_messages(self);
     }
 
     /// Handles the key events and updates the state of [`App`].
     fn on_key_event(&mut self, key: KeyEvent) {
+        if matches!(self.view, AppView::LearnChainSetup)
+            && self.learnchain_setup.step == LearnChainSetupStep::Success
+        {
+            LearnChainSetupManager::new(self).handle_key(key);
+            return;
+        }
+
         match (key.modifiers, key.code) {
             (_, KeyCode::Esc | KeyCode::Char('q'))
             | (KeyModifiers::CONTROL, KeyCode::Char('c') | KeyCode::Char('C')) => self.quit(),
             _ => match self.view {
                 AppView::Menu => MenuManager::new(self).handle_menu_key(key),
+                AppView::LearnChainSetup => LearnChainSetupManager::new(self).handle_key(key),
+                AppView::SkillInstaller => SkillInstallerManager::new(self).handle_key(key),
                 AppView::Events => MenuManager::new(self).handle_events_key(key),
                 AppView::SessionPicker => SessionPickerManager::new(self).handle_key(key),
                 AppView::Learning => LearningManager::new(self).handle_key(key),
@@ -1188,6 +1207,8 @@ impl App {
     fn on_paste_event(&mut self, text: String) {
         if matches!(self.view, AppView::Config) {
             ConfigManager::new(self).handle_paste(&text);
+        } else if matches!(self.view, AppView::LearnChainSetup) {
+            LearnChainSetupManager::new(self).handle_paste(&text);
         }
     }
 
@@ -1203,6 +1224,8 @@ impl App {
         self.deep_dive_history_document = None;
         self.deep_dive_scroll = 0;
         self.library_selected = None;
+        self.skill_installer_selected_target = EmbeddedSkillTarget::Codex;
+        self.learnchain_setup = LearnChainSetupState::default();
         self.quiz_summary_results.clear();
         self.view = AppView::Menu;
     }
@@ -1241,6 +1264,29 @@ impl App {
         self.deep_dive_showing_history = false;
         self.deep_dive_scroll = 0;
         self.view = AppView::DeepDive;
+    }
+
+    pub(crate) fn should_show_learnchain_setup_action(&self) -> bool {
+        self.config_form.document_repository == config::DocumentRepositoryKind::LearnChain
+            && !self.config_form.has_learnchain_session()
+    }
+
+    pub(crate) fn persist_learnchain_session(
+        &mut self,
+        session: LearnChainStoredSession,
+    ) -> std::result::Result<String, String> {
+        let updated = config::update(|config| {
+            document_repository::apply_learnchain_session(config, &session);
+        })
+        .map_err(|err| err.to_string())?;
+        self.reload_session_from_config();
+        self.config_form.apply_saved(updated);
+        self.error = None;
+        Ok(if session.account_label.trim().is_empty() {
+            "unknown account".to_string()
+        } else {
+            session.account_label.trim().to_string()
+        })
     }
 
     pub(crate) fn record_quiz_first_attempt(
@@ -1353,199 +1399,14 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    fn args(values: &[&str]) -> Vec<String> {
-        values.iter().map(|value| value.to_string()).collect()
-    }
-
-    #[test]
-    fn parse_cli_options_supports_debug_flag_without_command() {
-        let options = parse_cli_options(&args(&["--debug"])).unwrap();
-        assert!(options.debug_logging);
-        assert!(options.command.is_none());
-    }
-
-    #[test]
-    fn parse_cli_options_supports_debug_flag_with_command() {
-        let options =
-            parse_cli_options(&args(&["--debug", "--set-openai-key", "secret-key"])).unwrap();
-        assert!(options.debug_logging);
-        assert_eq!(
-            options.command,
-            Some(CliCommand::SetOpenAiKey("secret-key".to_string()))
-        );
-    }
-
-    #[test]
-    fn parse_cli_options_rejects_multiple_commands() {
-        let error = parse_cli_options(&args(&["--help", "--version"])).unwrap_err();
-        assert!(error.contains("Multiple commands"));
-    }
-
-    #[test]
-    fn parse_cli_options_supports_setting_document_repository_target() {
-        let options =
-            parse_cli_options(&args(&["--set-document-repository-target", "database/abc"]))
-                .unwrap();
-
-        assert_eq!(
-            options.command,
-            Some(CliCommand::SetDocumentRepositoryTarget(
-                "database/abc".to_string()
-            ))
-        );
-    }
-
-    #[test]
-    fn parse_cli_options_supports_clearing_document_repository_target() {
-        let options = parse_cli_options(&args(&["--clear-document-repository-target"])).unwrap();
-        assert_eq!(
-            options.command,
-            Some(CliCommand::ClearDocumentRepositoryTarget)
-        );
-    }
-
-    #[test]
-    fn parse_cli_options_supports_setting_notion_api_token() {
-        let options = parse_cli_options(&args(&["--set-notion-api-token", "secret_test"])).unwrap();
-        assert_eq!(
-            options.command,
-            Some(CliCommand::SetNotionApiToken("secret_test".to_string()))
-        );
-    }
-
-    #[test]
-    fn parse_cli_options_supports_clearing_notion_api_token() {
-        let options = parse_cli_options(&args(&["--clear-notion-api-token"])).unwrap();
-        assert_eq!(options.command, Some(CliCommand::ClearNotionApiToken));
-    }
-
-    #[test]
-    fn parse_cli_options_supports_setting_document_repository() {
-        let options = parse_cli_options(&args(&["--set-document-repository", "notion"])).unwrap();
-        assert_eq!(
-            options.command,
-            Some(CliCommand::SetDocumentRepository(
-                config::DocumentRepositoryKind::Notion
-            ))
-        );
-    }
-
-    #[test]
-    fn parse_cli_options_supports_setting_learnchain_repository() {
-        let options =
-            parse_cli_options(&args(&["--set-document-repository", "learnchain"])).unwrap();
-        assert_eq!(
-            options.command,
-            Some(CliCommand::SetDocumentRepository(
-                config::DocumentRepositoryKind::LearnChain
-            ))
-        );
-    }
-
-    #[test]
-    fn parse_cli_options_supports_setting_learnchain_site_url() {
-        let options = parse_cli_options(&args(&[
-            "--set-learnchain-site-url",
-            "http://localhost:3000",
-        ]))
-        .unwrap();
-        assert_eq!(
-            options.command,
-            Some(CliCommand::SetLearnChainSiteUrl(
-                "http://localhost:3000".to_string()
-            ))
-        );
-    }
-
-    #[test]
-    fn parse_cli_options_supports_setting_learnchain_email() {
-        let options =
-            parse_cli_options(&args(&["--set-learnchain-email", "learner@example.com"])).unwrap();
-        assert_eq!(
-            options.command,
-            Some(CliCommand::SetLearnChainEmail(
-                "learner@example.com".to_string()
-            ))
-        );
-    }
-
-    #[test]
-    fn parse_cli_options_supports_setting_learnchain_password() {
-        let options =
-            parse_cli_options(&args(&["--set-learnchain-password", "secret-pass"])).unwrap();
-        assert_eq!(
-            options.command,
-            Some(CliCommand::SetLearnChainPassword("secret-pass".to_string()))
-        );
-    }
-
-    #[test]
-    fn parse_cli_options_supports_clearing_document_repository() {
-        let options = parse_cli_options(&args(&["--clear-document-repository"])).unwrap();
-        assert_eq!(options.command, Some(CliCommand::ClearDocumentRepository));
-    }
-
-    #[test]
-    fn parse_cli_options_supports_generating_codex_deep_dive() {
-        let options = parse_cli_options(&args(&["--generate-codex-deep-dive"])).unwrap();
-        assert_eq!(options.command, Some(CliCommand::GenerateCodexDeepDive));
-        assert!(options.codex_thread_id.is_none());
-    }
-
-    #[test]
-    fn parse_cli_options_supports_codex_thread_id_with_deep_dive_command() {
-        let options = parse_cli_options(&args(&[
-            "--generate-codex-deep-dive",
-            "--codex-thread-id",
-            "thread-123",
-        ]))
-        .unwrap();
-        assert_eq!(options.command, Some(CliCommand::GenerateCodexDeepDive));
-        assert_eq!(options.codex_thread_id.as_deref(), Some("thread-123"));
-    }
-
-    #[test]
-    fn parse_cli_options_supports_exporting_document_repository_with_deep_dive_command() {
-        let options = parse_cli_options(&args(&[
-            "--generate-codex-deep-dive",
-            "--export-to-document-repository",
-        ]))
-        .unwrap();
-        assert_eq!(options.command, Some(CliCommand::GenerateCodexDeepDive));
-        assert!(options.export_document_repository);
-    }
-
-    #[test]
-    fn parse_cli_options_rejects_codex_thread_id_without_deep_dive_command() {
-        let error = parse_cli_options(&args(&["--codex-thread-id", "thread-123"])).unwrap_err();
-        assert!(error.contains("--generate-codex-deep-dive"));
-    }
-
-    #[test]
-    fn parse_cli_options_rejects_export_without_deep_dive_command() {
-        let error = parse_cli_options(&args(&["--export-to-document-repository"])).unwrap_err();
-        assert!(error.contains("--generate-codex-deep-dive"));
-    }
-
-    #[test]
-    fn parse_cli_options_supports_printing_codex_action_template() {
-        let options = parse_cli_options(&args(&["--print-codex-deep-dive-action"])).unwrap();
-        assert_eq!(options.command, Some(CliCommand::PrintCodexDeepDiveAction));
-    }
-
-    #[test]
-    fn parse_cli_options_supports_installing_codex_skill() {
-        let options = parse_cli_options(&args(&["--install-codex-deep-dive-skill"])).unwrap();
-        assert_eq!(options.command, Some(CliCommand::InstallCodexDeepDiveSkill));
-    }
-
     #[test]
     fn codex_action_template_contains_expected_command() {
         let template = codex_deep_dive_action_template();
         assert!(template.contains("/learnchain-deep-dive"));
-        assert!(template.contains(
-            "learnchain --generate-codex-deep-dive --codex-thread-id \"$CODEX_THREAD_ID\""
-        ));
+        assert!(
+            template
+                .contains("learnchain deep-dive generate codex --thread-id \"$CODEX_THREAD_ID\"")
+        );
     }
 
     #[test]
@@ -1614,14 +1475,104 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let skill_dir = install_embedded_codex_skill_at(temp_dir.path()).unwrap();
 
-        assert_eq!(skill_dir, temp_dir.path().join(CODEX_SKILL_NAME));
+        assert_eq!(skill_dir, temp_dir.path().join(EMBEDDED_SKILL_NAME));
         let skill_markdown = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
         let openai_yaml = std::fs::read_to_string(skill_dir.join("agents/openai.yaml")).unwrap();
 
         assert!(skill_markdown.contains("name: learnchain-deep-dive"));
-        assert!(skill_markdown.contains("learnchain --generate-codex-deep-dive"));
+        assert!(skill_markdown.contains("learnchain deep-dive generate codex"));
         assert!(skill_markdown.contains("/dashboard/documents/<id>"));
         assert!(openai_yaml.contains("display_name: \"LearnChain Deep Dive\""));
         assert!(openai_yaml.contains("default_prompt:"));
+    }
+
+    #[test]
+    fn install_embedded_claude_skill_writes_skill_file_only() {
+        let temp_dir = tempdir().unwrap();
+        let skill_dir = install_embedded_claude_skill_at(temp_dir.path()).unwrap();
+
+        assert_eq!(skill_dir, temp_dir.path().join(EMBEDDED_SKILL_NAME));
+        let skill_markdown = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
+
+        assert!(skill_markdown.contains("name: learnchain-deep-dive"));
+        assert!(skill_markdown.contains("learnchain deep-dive generate claude"));
+        assert!(skill_markdown.contains("--session-id"));
+        assert!(!skill_dir.join("agents/openai.yaml").exists());
+    }
+
+    fn sample_session(id: &str, timestamp: &str, source_label: &str) -> Session {
+        Session {
+            id: id.to_string(),
+            date: timestamp[..10].to_string(),
+            timestamp: timestamp.to_string(),
+            cwd: "/tmp/project".to_string(),
+            summary: format!("Session {}", id),
+            first_user_prompt: None,
+            source_file: PathBuf::from(format!("/tmp/{}.jsonl", id)),
+            source_label: source_label.to_string(),
+            analytics: crate::session_analytics::SessionAnalytics::default(),
+            events: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn resolve_deep_dive_session_uses_latest_claude_session_by_default() {
+        let sessions = vec![
+            sample_session("older", "2026-03-09T10:00:00Z", "Claude Code"),
+            sample_session("newer", "2026-03-10T10:00:00Z", "Claude Code"),
+        ];
+
+        let resolution = resolve_deep_dive_session(
+            config::SessionSourceKind::ClaudeCode,
+            sessions,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(resolution.session.id, "newer");
+        assert!(resolution.fallback_note.is_none());
+    }
+
+    #[test]
+    fn resolve_deep_dive_session_honors_explicit_claude_session_id() {
+        let sessions = vec![
+            sample_session("older", "2026-03-09T10:00:00Z", "Claude Code"),
+            sample_session("picked", "2026-03-10T10:00:00Z", "Claude Code"),
+        ];
+
+        let resolution = resolve_deep_dive_session(
+            config::SessionSourceKind::ClaudeCode,
+            sessions,
+            None,
+            Some("picked"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(resolution.session.id, "picked");
+        assert!(resolution.fallback_note.is_none());
+    }
+
+    #[test]
+    fn resolve_deep_dive_session_rejects_unknown_claude_session_id() {
+        let sessions = vec![sample_session(
+            "known",
+            "2026-03-09T10:00:00Z",
+            "Claude Code",
+        )];
+
+        let error = resolve_deep_dive_session(
+            config::SessionSourceKind::ClaudeCode,
+            sessions,
+            None,
+            Some("missing"),
+            None,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("missing"));
+        assert!(error.contains("Claude Code"));
     }
 }

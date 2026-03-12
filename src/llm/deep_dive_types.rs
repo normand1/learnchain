@@ -69,6 +69,21 @@ pub struct DeepDiveReviewedSource {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct DeepDiveTakeawayCard {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub why_it_matters: String,
+    #[serde(default)]
+    pub source_url: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StructuredDeepDiveResponse {
     #[serde(default)]
     pub title: String,
@@ -82,6 +97,8 @@ pub struct StructuredDeepDiveResponse {
     pub teaching_narrative: Vec<String>,
     #[serde(default)]
     pub reviewed_sources: Vec<DeepDiveReviewedSource>,
+    #[serde(default)]
+    pub key_takeaways: Vec<DeepDiveTakeawayCard>,
     #[serde(default)]
     pub quiz_groups: Vec<KnowledgeResponse>,
 }

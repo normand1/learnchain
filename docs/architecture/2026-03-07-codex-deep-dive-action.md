@@ -8,11 +8,11 @@ LearnChain already supported session deep dives inside the TUI, but Codex users 
 
 LearnChain now exposes a headless Codex-specific deep-dive command:
 
-- `learnchain --generate-codex-deep-dive`
-- `learnchain --generate-codex-deep-dive --codex-thread-id <id>`
-- `learnchain --generate-codex-deep-dive --export-to-document-repository`
-- `learnchain --print-codex-deep-dive-action`
-- `learnchain --install-codex-deep-dive-skill`
+- `learnchain deep-dive generate codex`
+- `learnchain deep-dive generate codex --thread-id <id>`
+- `learnchain deep-dive generate codex --export`
+- `learnchain action print codex`
+- `learnchain skill install codex`
 
 The headless path resolves the active session from `CODEX_THREAD_ID` when present, falls back to the most recent Codex session when that env var is stale or missing, and writes the same markdown artifact to `output/deep-dives/` as the TUI flow.
 

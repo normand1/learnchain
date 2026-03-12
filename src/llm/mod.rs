@@ -6,7 +6,7 @@ pub(crate) mod types;
 pub(crate) use backend::LlmBackend;
 pub(crate) use deep_dive_types::{
     DeepDiveArtifactMetadata, DeepDiveDocument, DeepDiveGenerationResult, DeepDiveHistoryEntry,
-    DeepDiveResearchPlan, DeepDiveReviewedSource, StructuredDeepDiveResponse,
+    DeepDiveResearchPlan, DeepDiveReviewedSource, DeepDiveTakeawayCard, StructuredDeepDiveResponse,
 };
 pub(crate) use types::{LearningGenerationResult, StructuredLearningResponse};
 
@@ -37,10 +37,15 @@ pub(crate) fn handle_learning_success(app: &mut App, mut result: LearningGenerat
         .iter()
         .map(|group| group.quiz.len())
         .sum();
+    let quiz_session_date = if app.active_quiz_session_date.trim().is_empty() {
+        app.session_date.clone()
+    } else {
+        app.active_quiz_session_date.clone()
+    };
 
     let save_result = write_ai_response(app, &structured);
     let store_result = Some(knowledge_store::record_learning_response(
-        &app.session_date,
+        &quiz_session_date,
         &structured,
     ));
     let mut status_parts = Vec::new();
@@ -99,6 +104,7 @@ pub(crate) fn handle_learning_success(app: &mut App, mut result: LearningGenerat
     app.quiz_first_attempts.clear();
     app.analytics_snapshot = None;
     app.analytics_refreshed_at = None;
+    app.active_quiz_session_date = quiz_session_date;
     app.learning_response = Some(structured);
     app.last_quiz_event_timestamp = app.last_event_timestamp.clone();
     app.view = AppView::Learning;
@@ -171,12 +177,13 @@ pub(crate) fn handle_ai_error(app: &mut App, kind: AiTaskKind, message: String) 
 fn learning_call_progress_message(provider: crate::config::AiProvider) -> &'static str {
     match provider {
         crate::config::AiProvider::CodexCli => "Calling Codex CLI...",
+        crate::config::AiProvider::ClaudeCodeCli => "Calling Claude Code CLI...",
         _ => "Calling LLM via Rig...",
     }
 }
 
 pub(crate) fn trigger_learning_response(app: &mut App) {
-    log_debug("App: menu option 'Generate learning response' selected");
+    log_debug("App: menu option 'Generate quiz' selected");
     if app.ai_loading {
         log_debug("App: AI generation already in progress; ignoring duplicate request");
         return;
@@ -203,6 +210,7 @@ pub(crate) fn trigger_learning_response(app: &mut App) {
         return;
     }
 
+    app.active_quiz_session_date = app.session_date.clone();
     app.view = AppView::Learning;
     start_ai_task(app, AiTaskKind::LearningLesson);
     let summary_override = app.summary_content.clone();
@@ -283,6 +291,10 @@ pub(crate) fn trigger_learning_response_skip_sync(app: &mut App) {
             "No session content available for generation.".to_string(),
         );
         return;
+    }
+
+    if app.active_quiz_session_date.trim().is_empty() {
+        app.active_quiz_session_date = app.session_date.clone();
     }
 
     app.view = AppView::Learning;
@@ -395,6 +407,7 @@ pub(crate) fn trigger_deep_dive_response_from_session(app: &mut App, session: Se
             session,
             deep_dive_sections,
             min_quiz_questions,
+            None,
             &sender,
         ));
         drop(runtime);
@@ -428,6 +441,8 @@ fn start_ai_task(app: &mut App, kind: AiTaskKind) {
     app.ai_loading_start = Some(Instant::now());
     app.ai_progress_percent = 0;
     app.ai_progress_message = "Initializing...".to_string();
+    app.ai_progress_timeline.clear();
+    app.record_ai_progress(kind, "Initializing...".to_string(), 0);
     app.update_loading_status();
     app.ai_sender = Some(sender);
 }
@@ -443,11 +458,54 @@ fn send_progress(sender: &Sender<AiTaskMessage>, kind: AiTaskKind, message: &str
 }
 
 impl App {
+    pub(crate) fn record_ai_progress(&mut self, kind: AiTaskKind, message: String, percent: u8) {
+        let elapsed_secs = self
+            .ai_loading_start
+            .map(|start| start.elapsed().as_secs())
+            .unwrap_or(0);
+        let percent = percent.min(100);
+
+        self.ai_task_kind = Some(kind);
+        self.ai_progress_percent = percent;
+        self.ai_progress_message = message.clone();
+
+        if let Some(last_step) = self.ai_progress_timeline.last_mut() {
+            if last_step.message == message {
+                last_step.percent = percent;
+                return;
+            }
+
+            if last_step.completed_at_secs.is_none() {
+                last_step.completed_at_secs = Some(elapsed_secs);
+            }
+        }
+
+        self.ai_progress_timeline.push(crate::AiProgressStep {
+            message,
+            percent,
+            started_at_secs: elapsed_secs,
+            completed_at_secs: None,
+        });
+    }
+
+    pub(crate) fn finish_ai_progress_timeline(&mut self) {
+        let elapsed_secs = self
+            .ai_loading_start
+            .map(|start| start.elapsed().as_secs())
+            .unwrap_or(0);
+
+        if let Some(last_step) = self.ai_progress_timeline.last_mut() {
+            if last_step.completed_at_secs.is_none() {
+                last_step.completed_at_secs = Some(elapsed_secs);
+            }
+        }
+    }
+
     pub(crate) fn update_loading_status(&mut self) {
         if self.ai_loading {
             let frame = AI_LOADING_FRAMES[self.ai_loading_frame % AI_LOADING_FRAMES.len()];
             let label = match self.ai_task_kind.unwrap_or(AiTaskKind::LearningLesson) {
-                AiTaskKind::LearningLesson => "Generating learning response…",
+                AiTaskKind::LearningLesson => "Generating quiz…",
                 AiTaskKind::SessionDeepDive => "Generating session deep dive…",
             };
             self.ai_status = Some(format!("{} {}", frame, label));
@@ -474,12 +532,18 @@ fn write_ai_response(app: &App, response: &StructuredLearningResponse) -> Result
         )
     })?;
 
-    let mut path = output_dir.join(format!("learning-response-{}.json", app.session_date));
+    let session_date = if app.active_quiz_session_date.trim().is_empty() {
+        &app.session_date
+    } else {
+        &app.active_quiz_session_date
+    };
+
+    let mut path = output_dir.join(format!("learning-response-{}.json", session_date));
     let mut counter = 2;
     while path.exists() {
         path = output_dir.join(format!(
             "learning-response-{}-{}.json",
-            app.session_date, counter
+            session_date, counter
         ));
         counter += 1;
     }
@@ -493,50 +557,55 @@ fn write_ai_response(app: &App, response: &StructuredLearningResponse) -> Result
 
 pub(crate) fn poll_ai_messages(app: &mut App) {
     let mut clear_receiver = false;
-    if let Some(receiver) = app.ai_result_receiver.as_ref() {
-        loop {
-            match receiver.try_recv() {
-                Ok(message) => match message {
-                    AiTaskMessage::LearningSuccess(response) => {
-                        app.ai_loading = false;
-                        app.ai_loading_start = None;
-                        app.ai_task_kind = None;
-                        clear_receiver = true;
-                        handle_learning_success(app, response);
-                        break;
-                    }
-                    AiTaskMessage::DeepDiveSuccess(response) => {
-                        app.ai_loading = false;
-                        app.ai_loading_start = None;
-                        app.ai_task_kind = None;
-                        clear_receiver = true;
-                        handle_deep_dive_success(app, response);
-                        break;
-                    }
-                    AiTaskMessage::Error(kind, message) => {
-                        app.ai_loading = false;
-                        app.ai_loading_start = None;
-                        app.ai_task_kind = None;
-                        clear_receiver = true;
-                        handle_ai_error(app, kind, message);
-                        break;
-                    }
-                    AiTaskMessage::Progress(kind, message, percent) => {
-                        app.ai_task_kind = Some(kind);
-                        app.ai_progress_message = message;
-                        app.ai_progress_percent = percent;
-                    }
-                },
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    let kind = app.ai_task_kind.unwrap_or(AiTaskKind::LearningLesson);
+    loop {
+        let next_message = match app.ai_result_receiver.as_ref() {
+            Some(receiver) => receiver.try_recv(),
+            None => break,
+        };
+
+        match next_message {
+            Ok(message) => match message {
+                AiTaskMessage::LearningSuccess(response) => {
+                    app.finish_ai_progress_timeline();
                     app.ai_loading = false;
                     app.ai_loading_start = None;
                     app.ai_task_kind = None;
                     clear_receiver = true;
-                    handle_ai_error(app, kind, "Background AI worker disconnected".to_string());
+                    handle_learning_success(app, response);
                     break;
                 }
+                AiTaskMessage::DeepDiveSuccess(response) => {
+                    app.finish_ai_progress_timeline();
+                    app.ai_loading = false;
+                    app.ai_loading_start = None;
+                    app.ai_task_kind = None;
+                    clear_receiver = true;
+                    handle_deep_dive_success(app, response);
+                    break;
+                }
+                AiTaskMessage::Error(kind, message) => {
+                    app.finish_ai_progress_timeline();
+                    app.ai_loading = false;
+                    app.ai_loading_start = None;
+                    app.ai_task_kind = None;
+                    clear_receiver = true;
+                    handle_ai_error(app, kind, message);
+                    break;
+                }
+                AiTaskMessage::Progress(kind, message, percent) => {
+                    app.record_ai_progress(kind, message, percent);
+                }
+            },
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => {
+                let kind = app.ai_task_kind.unwrap_or(AiTaskKind::LearningLesson);
+                app.finish_ai_progress_timeline();
+                app.ai_loading = false;
+                app.ai_loading_start = None;
+                app.ai_task_kind = None;
+                clear_receiver = true;
+                handle_ai_error(app, kind, "Background AI worker disconnected".to_string());
+                break;
             }
         }
     }
@@ -552,7 +621,7 @@ mod tests {
     use super::*;
     use crate::config::{AiProvider, AnthropicModelKind, AppConfig, ConfigForm, OpenAiModelKind};
     use crate::llm::types::{KnowledgeResponse, LlmUsage, QuizItem, QuizOption};
-    use std::{collections::HashSet, sync::mpsc};
+    use std::{collections::HashSet, sync::mpsc, time::Duration};
 
     fn test_app() -> App {
         App {
@@ -580,11 +649,13 @@ mod tests {
             ai_loading_start: None,
             ai_progress_percent: 0,
             ai_progress_message: String::new(),
+            ai_progress_timeline: Vec::new(),
             ai_result_receiver: None,
             ai_sender: None,
             document_export_receiver: None,
             document_export_loading: false,
             learning_response: None,
+            active_quiz_session_date: String::new(),
             learning_group_index: 0,
             learning_quiz_index: 0,
             learning_option_index: 0,
@@ -618,6 +689,8 @@ mod tests {
             deep_dive_showing_history: false,
             library_artifacts: Vec::new(),
             library_selected: None,
+            skill_installer_selected_target: crate::EmbeddedSkillTarget::Codex,
+            learnchain_setup: crate::LearnChainSetupState::default(),
         }
     }
 
@@ -723,11 +796,31 @@ mod tests {
     }
 
     #[test]
+    fn learning_call_progress_message_mentions_claude_code_cli() {
+        assert_eq!(
+            learning_call_progress_message(AiProvider::ClaudeCodeCli),
+            "Calling Claude Code CLI..."
+        );
+    }
+
+    #[test]
     fn poll_ai_messages_processes_success_and_clears_receiver() {
         let mut app = test_app();
         app.ai_loading = true;
+        app.ai_loading_start = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(3))
+                .expect("duration should be subtractable from Instant"),
+        );
         let (sender, receiver) = mpsc::channel();
         app.ai_result_receiver = Some(receiver);
+        sender
+            .send(AiTaskMessage::Progress(
+                AiTaskKind::LearningLesson,
+                "Loading session summary...".to_string(),
+                10,
+            ))
+            .unwrap();
         sender
             .send(AiTaskMessage::LearningSuccess(sample_result()))
             .unwrap();
@@ -738,14 +831,39 @@ mod tests {
         assert!(app.ai_result_receiver.is_none());
         assert!(app.learning_response.is_some());
         assert_eq!(app.view, AppView::Learning);
+        assert_eq!(app.ai_progress_timeline.len(), 1);
+        assert_eq!(
+            app.ai_progress_timeline[0].message,
+            "Loading session summary..."
+        );
+        assert!(app.ai_progress_timeline[0].completed_at_secs.is_some());
     }
 
     #[test]
     fn poll_ai_messages_processes_error_and_clears_receiver() {
         let mut app = test_app();
         app.ai_loading = true;
+        app.ai_loading_start = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(5))
+                .expect("duration should be subtractable from Instant"),
+        );
         let (sender, receiver) = mpsc::channel();
         app.ai_result_receiver = Some(receiver);
+        sender
+            .send(AiTaskMessage::Progress(
+                AiTaskKind::LearningLesson,
+                "Preparing structured learning request...".to_string(),
+                40,
+            ))
+            .unwrap();
+        sender
+            .send(AiTaskMessage::Progress(
+                AiTaskKind::LearningLesson,
+                "Waiting for provider response...".to_string(),
+                55,
+            ))
+            .unwrap();
         sender
             .send(AiTaskMessage::Error(
                 AiTaskKind::LearningLesson,
@@ -759,5 +877,16 @@ mod tests {
         assert!(app.ai_result_receiver.is_none());
         let error = app.error.as_ref().unwrap();
         assert!(error.contains("AI generation failed: failure"));
+        assert_eq!(app.ai_progress_timeline.len(), 2);
+        assert_eq!(
+            app.ai_progress_timeline[0].message,
+            "Preparing structured learning request..."
+        );
+        assert_eq!(
+            app.ai_progress_timeline[1].message,
+            "Waiting for provider response..."
+        );
+        assert!(app.ai_progress_timeline[0].completed_at_secs.is_some());
+        assert!(app.ai_progress_timeline[1].completed_at_secs.is_some());
     }
 }

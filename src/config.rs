@@ -180,6 +180,12 @@ impl AppConfig {
                 model_label: "CLI default".to_string(),
                 api_key: String::new(),
             },
+            AiProvider::ClaudeCodeCli => ResolvedLlmConfig {
+                provider: self.ai_provider,
+                model_name: "claude-code-print".to_string(),
+                model_label: "CLI default".to_string(),
+                api_key: String::new(),
+            },
         }
     }
 }
@@ -240,15 +246,6 @@ impl DocumentRepositoryKind {
 
     pub fn previous(self) -> Self {
         self.next()
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "none" => Some(Self::None),
-            "notion" => Some(Self::Notion),
-            "learnchain" => Some(Self::LearnChain),
-            _ => None,
-        }
     }
 }
 
@@ -450,6 +447,7 @@ pub enum AiProvider {
     Anthropic,
     OpenRouter,
     CodexCli,
+    ClaudeCodeCli,
 }
 
 impl AiProvider {
@@ -459,22 +457,26 @@ impl AiProvider {
             Self::Anthropic => "Anthropic",
             Self::OpenRouter => "OpenRouter",
             Self::CodexCli => "Codex CLI",
+            Self::ClaudeCodeCli => "Claude Code CLI",
         }
     }
 
     pub fn setup_help(self) -> &'static str {
         match self {
             Self::OpenAI => {
-                "OpenAI API key not configured. Open the Config view (select \"OpenAI API key\" and press Enter) or run `learnchain --set-openai-key <your-key>` to add it."
+                "OpenAI API key not configured. Open the Config view (select \"OpenAI API key\" and press Enter) or run `learnchain config set openai-key <your-key>` to add it."
             }
             Self::Anthropic => {
-                "Anthropic API key not configured. Open the Config view or run `learnchain --set-anthropic-key <your-key>` to add it."
+                "Anthropic API key not configured. Open the Config view or run `learnchain config set anthropic-key <your-key>` to add it."
             }
             Self::OpenRouter => {
-                "OpenRouter API key not configured. Open the Config view or run `learnchain --set-openrouter-key <your-key>` to add it."
+                "OpenRouter API key not configured. Open the Config view or run `learnchain config set openrouter-key <your-key>` to add it."
             }
             Self::CodexCli => {
                 "Codex CLI is not available. Ensure `codex` is installed and authenticated in your shell."
+            }
+            Self::ClaudeCodeCli => {
+                "Claude Code CLI is not available. Ensure `claude` is installed and authenticated in your shell."
             }
         }
     }
@@ -484,16 +486,18 @@ impl AiProvider {
             Self::OpenAI => Self::Anthropic,
             Self::Anthropic => Self::OpenRouter,
             Self::OpenRouter => Self::CodexCli,
-            Self::CodexCli => Self::OpenAI,
+            Self::CodexCli => Self::ClaudeCodeCli,
+            Self::ClaudeCodeCli => Self::OpenAI,
         }
     }
 
     pub fn previous(self) -> Self {
         match self {
-            Self::OpenAI => Self::CodexCli,
+            Self::OpenAI => Self::ClaudeCodeCli,
             Self::Anthropic => Self::OpenAI,
             Self::OpenRouter => Self::Anthropic,
             Self::CodexCli => Self::OpenRouter,
+            Self::ClaudeCodeCli => Self::CodexCli,
         }
     }
 }
@@ -533,6 +537,19 @@ pub(crate) enum ConfigSection {
     DeepDive,
     Export,
     Ai,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigNavigationFocus {
+    Section,
+    Step,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LearnChainAuthFeedback {
+    Neutral,
+    Success,
+    Failure,
 }
 
 impl ConfigSection {
@@ -586,6 +603,7 @@ pub struct ConfigForm {
     pub(crate) learnchain_auth_code: String,
     editing_learnchain_auth_code: bool,
     learnchain_auth_code_buffer: String,
+    learnchain_auth_feedback: LearnChainAuthFeedback,
     // Provider selection
     pub(crate) ai_provider: AiProvider,
     // OpenAI
@@ -606,6 +624,8 @@ pub struct ConfigForm {
     editing_openrouter_model: bool,
     openrouter_model_buffer: String,
     // Form state
+    selected_section: ConfigSection,
+    navigation_focus: ConfigNavigationFocus,
     pub(crate) field: ConfigField,
     pub(crate) dirty: bool,
     pub(crate) status: Option<String>,
@@ -637,6 +657,7 @@ impl ConfigForm {
             learnchain_auth_code: String::new(),
             editing_learnchain_auth_code: false,
             learnchain_auth_code_buffer: String::new(),
+            learnchain_auth_feedback: LearnChainAuthFeedback::Neutral,
             ai_provider: config.ai_provider,
             openai_model: config.openai_model,
             openai_api_key: config.openai_api_key,
@@ -652,6 +673,8 @@ impl ConfigForm {
             openrouter_key_buffer: String::new(),
             editing_openrouter_model: false,
             openrouter_model_buffer: String::new(),
+            selected_section: ConfigSection::Session,
+            navigation_focus: ConfigNavigationFocus::Section,
             field: ConfigField::MaxEvents,
             dirty: false,
             status: None,
@@ -685,6 +708,12 @@ impl ConfigForm {
             AiProvider::CodexCli => ResolvedLlmConfig {
                 provider: self.ai_provider,
                 model_name: "codex-exec".to_string(),
+                model_label: "CLI default".to_string(),
+                api_key: String::new(),
+            },
+            AiProvider::ClaudeCodeCli => ResolvedLlmConfig {
+                provider: self.ai_provider,
+                model_name: "claude-code-print".to_string(),
                 model_label: "CLI default".to_string(),
                 api_key: String::new(),
             },
@@ -739,7 +768,7 @@ impl ConfigForm {
                 fields.push(ConfigField::OpenRouterModel);
                 fields.push(ConfigField::OpenRouterKey);
             }
-            AiProvider::CodexCli => {}
+            AiProvider::CodexCli | AiProvider::ClaudeCodeCli => {}
         }
 
         fields
@@ -783,11 +812,28 @@ impl ConfigForm {
     }
 
     pub(crate) fn selected_section(&self) -> ConfigSection {
-        Self::section_for_field(self.field)
+        self.selected_section
+    }
+
+    pub(crate) fn is_section_navigation_focused(&self) -> bool {
+        self.navigation_focus == ConfigNavigationFocus::Section
+    }
+
+    pub(crate) fn is_step_navigation_focused(&self) -> bool {
+        self.navigation_focus == ConfigNavigationFocus::Step
+    }
+
+    pub(crate) fn focus_section_navigation(&mut self) {
+        self.navigation_focus = ConfigNavigationFocus::Section;
+    }
+
+    pub(crate) fn focus_step_navigation(&mut self) {
+        self.navigation_focus = ConfigNavigationFocus::Step;
+        self.sync_field_to_selected_section();
     }
 
     pub(crate) fn selected_index_in_section(&self) -> usize {
-        let visible = self.visible_fields_in_section(self.selected_section());
+        let visible = self.visible_fields_in_section(self.selected_section);
         visible
             .iter()
             .position(|field| *field == self.field)
@@ -795,21 +841,63 @@ impl ConfigForm {
     }
 
     pub(crate) fn select_next(&mut self) {
-        let visible = self.visible_fields();
-        let current_index = visible.iter().position(|f| *f == self.field).unwrap_or(0);
-        let next_index = (current_index + 1) % visible.len();
-        self.field = visible[next_index];
+        match self.navigation_focus {
+            ConfigNavigationFocus::Section => {
+                let sections = [
+                    ConfigSection::Session,
+                    ConfigSection::DeepDive,
+                    ConfigSection::Export,
+                    ConfigSection::Ai,
+                ];
+                let current_index = sections
+                    .iter()
+                    .position(|section| *section == self.selected_section)
+                    .unwrap_or(0);
+                let next_index = (current_index + 1) % sections.len();
+                self.selected_section = sections[next_index];
+                self.sync_field_to_selected_section();
+            }
+            ConfigNavigationFocus::Step => {
+                let visible = self.visible_fields_in_section(self.selected_section);
+                let current_index = visible.iter().position(|f| *f == self.field).unwrap_or(0);
+                let next_index = (current_index + 1) % visible.len();
+                self.field = visible[next_index];
+            }
+        }
     }
 
     pub(crate) fn select_previous(&mut self) {
-        let visible = self.visible_fields();
-        let current_index = visible.iter().position(|f| *f == self.field).unwrap_or(0);
-        let prev_index = if current_index == 0 {
-            visible.len() - 1
-        } else {
-            current_index - 1
-        };
-        self.field = visible[prev_index];
+        match self.navigation_focus {
+            ConfigNavigationFocus::Section => {
+                let sections = [
+                    ConfigSection::Session,
+                    ConfigSection::DeepDive,
+                    ConfigSection::Export,
+                    ConfigSection::Ai,
+                ];
+                let current_index = sections
+                    .iter()
+                    .position(|section| *section == self.selected_section)
+                    .unwrap_or(0);
+                let prev_index = if current_index == 0 {
+                    sections.len() - 1
+                } else {
+                    current_index - 1
+                };
+                self.selected_section = sections[prev_index];
+                self.sync_field_to_selected_section();
+            }
+            ConfigNavigationFocus::Step => {
+                let visible = self.visible_fields_in_section(self.selected_section);
+                let current_index = visible.iter().position(|f| *f == self.field).unwrap_or(0);
+                let prev_index = if current_index == 0 {
+                    visible.len() - 1
+                } else {
+                    current_index - 1
+                };
+                self.field = visible[prev_index];
+            }
+        }
     }
 
     pub(crate) fn adjust_current(&mut self, delta: isize) {
@@ -881,6 +969,7 @@ impl ConfigForm {
                     {
                         self.learnchain_site_url = default_learnchain_site_url();
                     }
+                    self.clear_learnchain_auth_feedback();
                     self.dirty = true;
                     self.status = match self.document_repository {
                         DocumentRepositoryKind::LearnChain if !self.has_learnchain_auth() => Some(
@@ -913,9 +1002,11 @@ impl ConfigForm {
                     self.dirty = true;
                     self.status = match updated {
                         AiProvider::CodexCli => Some(codex_cli_config_help_message().to_string()),
+                        AiProvider::ClaudeCodeCli => {
+                            Some(claude_code_cli_config_help_message().to_string())
+                        }
                         _ => None,
                     };
-                    // Reset field to AiProvider when provider changes to avoid pointing to hidden field
                     self.field = ConfigField::AiProvider;
                 }
             }
@@ -977,6 +1068,8 @@ impl ConfigForm {
                 }
             }
         }
+
+        self.sync_field_to_selected_section();
     }
 
     pub(crate) fn apply_saved(&mut self, config: AppConfig) {
@@ -1003,6 +1096,7 @@ impl ConfigForm {
         self.learnchain_auth_code.clear();
         self.editing_learnchain_auth_code = false;
         self.learnchain_auth_code_buffer.clear();
+        self.learnchain_auth_feedback = LearnChainAuthFeedback::Neutral;
         self.ai_provider = config.ai_provider;
         self.openai_model = config.openai_model;
         self.openai_api_key = config.openai_api_key;
@@ -1018,12 +1112,29 @@ impl ConfigForm {
         self.openrouter_key_buffer.clear();
         self.editing_openrouter_model = false;
         self.openrouter_model_buffer.clear();
+        self.sync_field_to_selected_section();
         self.dirty = false;
         self.status = None;
     }
 
     pub(crate) fn set_status<S: Into<String>>(&mut self, status: S) {
         self.status = Some(status.into());
+    }
+
+    pub(crate) fn learnchain_auth_feedback(&self) -> LearnChainAuthFeedback {
+        self.learnchain_auth_feedback
+    }
+
+    pub(crate) fn mark_learnchain_auth_success(&mut self) {
+        self.learnchain_auth_feedback = LearnChainAuthFeedback::Success;
+    }
+
+    pub(crate) fn mark_learnchain_auth_failure(&mut self) {
+        self.learnchain_auth_feedback = LearnChainAuthFeedback::Failure;
+    }
+
+    pub(crate) fn clear_learnchain_auth_feedback(&mut self) {
+        self.learnchain_auth_feedback = LearnChainAuthFeedback::Neutral;
     }
 
     pub(crate) fn is_editing_openai_key(&self) -> bool {
@@ -1194,6 +1305,7 @@ impl ConfigForm {
         let new_value = normalize_learnchain_site_url(&self.learnchain_site_url_buffer);
         if new_value != self.learnchain_site_url {
             self.learnchain_site_url = new_value;
+            self.clear_learnchain_auth_feedback();
             self.dirty = true;
             self.status = Some(format!(
                 "Updated LearnChain site URL. Dashboard: {}",
@@ -1241,6 +1353,7 @@ impl ConfigForm {
         let new_value = self.learnchain_auth_code_buffer.trim().to_uppercase();
         if new_value != self.learnchain_auth_code {
             self.learnchain_auth_code = new_value;
+            self.clear_learnchain_auth_feedback();
             self.dirty = true;
             self.status = Some("Updated LearnChain login code.".to_string());
         } else {
@@ -1273,6 +1386,7 @@ impl ConfigForm {
         self.learnchain_auth_code.clear();
         self.learnchain_auth_code_buffer.clear();
         self.editing_learnchain_auth_code = false;
+        self.clear_learnchain_auth_feedback();
         self.dirty = true;
         self.status = Some("Cleared LearnChain account authorization.".to_string());
     }
@@ -1476,6 +1590,15 @@ impl ConfigForm {
     pub(crate) fn current_field(&self) -> ConfigField {
         self.field
     }
+
+    fn sync_field_to_selected_section(&mut self) {
+        let visible = self.visible_fields_in_section(self.selected_section);
+        if !visible.contains(&self.field) {
+            if let Some(first) = visible.first().copied() {
+                self.field = first;
+            }
+        }
+    }
 }
 
 fn mask_secret(value: &str) -> String {
@@ -1536,6 +1659,10 @@ pub(crate) fn codex_cli_config_help_message() -> &'static str {
     "Codex CLI uses your existing codex login and default model/profile. LearnChain will pass only the prepared prompt and output schema."
 }
 
+pub(crate) fn claude_code_cli_config_help_message() -> &'static str {
+    "Claude Code CLI uses your existing claude login and default model/profile. LearnChain will pass the prepared prompt, system instructions, and output schema."
+}
+
 pub(crate) fn validate_learnchain_site_url(value: &str) -> std::result::Result<(), String> {
     let normalized = normalize_learnchain_site_url(value);
     let url = reqwest::Url::parse(&normalized)
@@ -1575,6 +1702,24 @@ fn normalize_learnchain_site_url(value: &str) -> String {
     } else {
         trimmed
     };
+    let resolved = if resolved.starts_with("localhost:")
+        || resolved.starts_with("127.0.0.1:")
+        || resolved.starts_with("0.0.0.0:")
+    {
+        format!("http://{}", resolved)
+    } else {
+        resolved.to_string()
+    };
+
+    if let Ok(mut url) = reqwest::Url::parse(&resolved) {
+        let host = url.host_str().unwrap_or_default();
+        if matches!(host, "learnchain.co" | "www.learnchain.co") {
+            let _ = url.set_scheme("https");
+            let _ = url.set_host(Some("www.learnchain.co"));
+            return url.to_string().trim_end_matches('/').to_string();
+        }
+    }
+
     resolved.trim_end_matches('/').to_string()
 }
 
@@ -1670,7 +1815,11 @@ mod tests {
         assert_eq!(resolved.model_name, "gpt-5");
         assert_eq!(resolved.model_label, "gpt-5");
         assert_eq!(resolved.api_key, "sk-openai");
-        assert!(AiProvider::OpenAI.setup_help().contains("--set-openai-key"));
+        assert!(
+            AiProvider::OpenAI
+                .setup_help()
+                .contains("config set openai-key")
+        );
     }
 
     #[test]
@@ -1690,7 +1839,7 @@ mod tests {
         assert!(
             AiProvider::Anthropic
                 .setup_help()
-                .contains("--set-anthropic-key")
+                .contains("config set anthropic-key")
         );
     }
 
@@ -1709,7 +1858,7 @@ mod tests {
         assert!(
             AiProvider::OpenRouter
                 .setup_help()
-                .contains("--set-openrouter-key")
+                .contains("config set openrouter-key")
         );
     }
 
@@ -1726,6 +1875,25 @@ mod tests {
         assert_eq!(resolved.model_label, "CLI default");
         assert!(resolved.api_key.is_empty());
         assert!(AiProvider::CodexCli.setup_help().contains("Codex CLI"));
+    }
+
+    #[test]
+    fn app_config_resolved_llm_for_claude_code_cli() {
+        let config = AppConfig {
+            ai_provider: AiProvider::ClaudeCodeCli,
+            ..AppConfig::default()
+        };
+
+        let resolved = config.resolved_llm();
+        assert_eq!(resolved.provider, AiProvider::ClaudeCodeCli);
+        assert_eq!(resolved.model_name, "claude-code-print");
+        assert_eq!(resolved.model_label, "CLI default");
+        assert!(resolved.api_key.is_empty());
+        assert!(
+            AiProvider::ClaudeCodeCli
+                .setup_help()
+                .contains("Claude Code CLI")
+        );
     }
 
     #[test]
@@ -1866,6 +2034,33 @@ mod tests {
     }
 
     #[test]
+    fn config_form_visible_fields_stop_at_provider_for_claude_code_cli() {
+        let form = ConfigForm::from_config(AppConfig {
+            ai_provider: AiProvider::ClaudeCodeCli,
+            ..AppConfig::default()
+        });
+        assert_eq!(
+            form.visible_fields(),
+            vec![
+                ConfigField::MaxEvents,
+                ConfigField::MinQuiz,
+                ConfigField::SamplingPercentage,
+                ConfigField::SessionSource,
+                ConfigField::DeepDiveSessionMetadata,
+                ConfigField::DeepDiveGoal,
+                ConfigField::DeepDiveAccomplishments,
+                ConfigField::DeepDiveInterestingLearnings,
+                ConfigField::DeepDiveTeachingNarrative,
+                ConfigField::DeepDiveReviewedExternalSources,
+                ConfigField::DeepDiveReferencedUrls,
+                ConfigField::OutputArtifacts,
+                ConfigField::DocumentRepository,
+                ConfigField::AiProvider,
+            ]
+        );
+    }
+
+    #[test]
     fn config_form_visible_fields_include_learnchain_fields_for_selected_repository() {
         let form = ConfigForm::from_config(AppConfig {
             document_repository: DocumentRepositoryKind::LearnChain,
@@ -1947,25 +2142,36 @@ mod tests {
     }
 
     #[test]
-    fn config_form_selected_section_tracks_current_field() {
+    fn config_form_section_navigation_updates_the_current_step() {
         let mut form = ConfigForm::from_config(AppConfig::default());
 
-        form.field = ConfigField::DocumentRepository;
-        assert_eq!(form.selected_section(), ConfigSection::Export);
-        assert_eq!(form.selected_index_in_section(), 1);
+        assert_eq!(form.selected_section(), ConfigSection::Session);
+        assert_eq!(form.current_field(), ConfigField::MaxEvents);
+        assert_eq!(form.selected_index_in_section(), 0);
 
-        form.field = ConfigField::DeepDiveTeachingNarrative;
+        form.select_next();
         assert_eq!(form.selected_section(), ConfigSection::DeepDive);
-        assert_eq!(form.selected_index_in_section(), 4);
+        assert_eq!(form.current_field(), ConfigField::DeepDiveSessionMetadata);
+        assert_eq!(form.selected_index_in_section(), 0);
 
-        form.field = ConfigField::OpenAiKey;
-        assert_eq!(form.selected_section(), ConfigSection::Ai);
+        form.focus_step_navigation();
+        form.select_next();
+        form.select_next();
+        assert_eq!(form.current_field(), ConfigField::DeepDiveAccomplishments);
         assert_eq!(form.selected_index_in_section(), 2);
+
+        form.focus_section_navigation();
+        form.select_previous();
+        form.select_previous();
+        assert_eq!(form.selected_section(), ConfigSection::Ai);
+        assert_eq!(form.current_field(), ConfigField::AiProvider);
+        assert_eq!(form.selected_index_in_section(), 0);
     }
 
     #[test]
     fn deep_dive_section_toggles_mark_form_dirty() {
         let mut form = ConfigForm::from_config(AppConfig::default());
+        form.selected_section = ConfigSection::DeepDive;
         form.field = ConfigField::DeepDiveReviewedExternalSources;
         assert!(form.deep_dive_sections.reviewed_external_sources);
 
@@ -1994,10 +2200,85 @@ mod tests {
     }
 
     #[test]
+    fn learnchain_auth_feedback_defaults_to_neutral_and_resets_after_save() {
+        let mut form = ConfigForm::from_config(AppConfig::default());
+        assert_eq!(
+            form.learnchain_auth_feedback(),
+            LearnChainAuthFeedback::Neutral
+        );
+
+        form.mark_learnchain_auth_success();
+        assert_eq!(
+            form.learnchain_auth_feedback(),
+            LearnChainAuthFeedback::Success
+        );
+
+        form.apply_saved(AppConfig::default());
+        assert_eq!(
+            form.learnchain_auth_feedback(),
+            LearnChainAuthFeedback::Neutral
+        );
+    }
+
+    #[test]
+    fn learnchain_auth_feedback_clears_when_login_code_changes() {
+        let mut form = ConfigForm::from_config(AppConfig::default());
+        form.learnchain_auth_code = "OLDCODE".to_string();
+        form.mark_learnchain_auth_failure();
+
+        form.start_editing_learnchain_auth_code();
+        form.learnchain_auth_code_buffer = "newcode".to_string();
+        form.apply_learnchain_auth_code_edit();
+
+        assert_eq!(form.learnchain_auth_code, "NEWCODE");
+        assert_eq!(
+            form.learnchain_auth_feedback(),
+            LearnChainAuthFeedback::Neutral
+        );
+    }
+
+    #[test]
+    fn learnchain_auth_feedback_clears_when_site_url_changes_or_session_is_cleared() {
+        let mut form = ConfigForm::from_config(AppConfig::default());
+        form.learnchain_site_url = "http://localhost:3000".to_string();
+        form.mark_learnchain_auth_success();
+
+        form.start_editing_learnchain_site_url();
+        form.learnchain_site_url_buffer = "https://learnchain.ai".to_string();
+        form.apply_learnchain_site_url_edit();
+        assert_eq!(
+            form.learnchain_auth_feedback(),
+            LearnChainAuthFeedback::Neutral
+        );
+
+        form.mark_learnchain_auth_failure();
+        form.learnchain_email = "user@example.com".to_string();
+        form.learnchain_access_token = "token".to_string();
+        form.clear_learnchain_session();
+        assert_eq!(
+            form.learnchain_auth_feedback(),
+            LearnChainAuthFeedback::Neutral
+        );
+    }
+
+    #[test]
+    fn learnchain_site_url_normalizes_bare_localhost_hosts() {
+        assert_eq!(
+            normalize_learnchain_site_url("localhost:3000"),
+            "http://localhost:3000"
+        );
+        assert_eq!(
+            normalize_learnchain_site_url("127.0.0.1:3000/"),
+            "http://127.0.0.1:3000"
+        );
+    }
+
+    #[test]
     fn config_form_document_repository_selector_cycles_supported_repositories() {
         let mut form = ConfigForm::from_config(AppConfig::default());
         assert_eq!(form.document_repository, DocumentRepositoryKind::None);
 
+        form.selected_section = ConfigSection::Export;
         form.field = ConfigField::DocumentRepository;
         form.adjust_current(1);
         assert_eq!(form.document_repository, DocumentRepositoryKind::Notion);
@@ -2010,8 +2291,9 @@ mod tests {
     }
 
     #[test]
-    fn ai_provider_selector_cycles_through_codex_cli() {
+    fn ai_provider_selector_cycles_through_cli_providers() {
         let mut form = ConfigForm::from_config(AppConfig::default());
+        form.selected_section = ConfigSection::Ai;
         form.field = ConfigField::AiProvider;
 
         form.adjust_current(1);
@@ -2028,7 +2310,17 @@ mod tests {
         );
 
         form.adjust_current(1);
+        assert_eq!(form.ai_provider, AiProvider::ClaudeCodeCli);
+        assert_eq!(
+            form.status.as_deref(),
+            Some(claude_code_cli_config_help_message())
+        );
+
+        form.adjust_current(1);
         assert_eq!(form.ai_provider, AiProvider::OpenAI);
+
+        form.adjust_current(-1);
+        assert_eq!(form.ai_provider, AiProvider::ClaudeCodeCli);
 
         form.adjust_current(-1);
         assert_eq!(form.ai_provider, AiProvider::CodexCli);
@@ -2039,6 +2331,18 @@ mod tests {
         assert_eq!(
             learnchain_signup_url("http://localhost:3000/"),
             "http://localhost:3000/login"
+        );
+    }
+
+    #[test]
+    fn learnchain_signup_url_canonicalizes_public_host_to_www_https() {
+        assert_eq!(
+            learnchain_signup_url("https://learnchain.co/"),
+            "https://www.learnchain.co/login"
+        );
+        assert_eq!(
+            learnchain_dashboard_url("http://learnchain.co"),
+            "https://www.learnchain.co/dashboard"
         );
     }
 
@@ -2150,5 +2454,29 @@ sampling_percentage = 10
         .unwrap();
 
         assert_eq!(config.ai_provider, AiProvider::CodexCli);
+    }
+
+    #[test]
+    fn app_config_deserializes_claude_code_cli_provider() {
+        let config: AppConfig = toml::from_str(
+            r#"
+default_max_events = 15
+min_quiz_questions = 5
+session_source = "codex"
+write_output_artifacts = false
+document_repository = "none"
+ai_provider = "claude_code_cli"
+openai_model = "gpt5-mini"
+openai_api_key = ""
+anthropic_model = "claude-sonnet4"
+anthropic_api_key = ""
+openrouter_model = ""
+openrouter_api_key = ""
+sampling_percentage = 10
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.ai_provider, AiProvider::ClaudeCodeCli);
     }
 }

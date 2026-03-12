@@ -52,28 +52,28 @@ LearnChain can generate quizzes with OpenAI, Anthropic, or OpenRouter. Provider 
 ### Option 2: configure keys from the CLI
 
 ```bash
-learnchain --set-openai-key <key>
-learnchain --set-anthropic-key <key>
-learnchain --set-openrouter-key <key>
+learnchain config set openai-key <key>
+learnchain config set anthropic-key <key>
+learnchain config set openrouter-key <key>
 ```
 
 You can also clear them:
 
 ```bash
-learnchain --clear-openai-key
-learnchain --clear-anthropic-key
-learnchain --clear-openrouter-key
+learnchain config clear openai-key
+learnchain config clear anthropic-key
+learnchain config clear openrouter-key
 ```
 
 You can also configure a generic deep-dive export destination for future document repository integrations:
 
 ```bash
-learnchain --set-document-repository notion
-learnchain --set-document-repository-target database/abcd1234
-learnchain --clear-document-repository
-learnchain --clear-document-repository-target
-learnchain --set-notion-api-token <token>
-learnchain --clear-notion-api-token
+learnchain config set repository notion
+learnchain config set repository-target database/abcd1234
+learnchain config clear repository
+learnchain config clear repository-target
+learnchain config set notion-token <token>
+learnchain config clear notion-token
 ```
 
 ## Codex Integration
@@ -82,27 +82,27 @@ LearnChain can generate a deep dive for the active Codex session without opening
 
 Prerequisites:
 
-- Install LearnChain and configure an LLM provider.
+- Install LearnChain and configure an LLM provider. This can be an API-backed provider or a local CLI provider such as Codex CLI or Claude Code CLI.
 - Run the command from a Codex session if you want LearnChain to resolve `CODEX_THREAD_ID` automatically.
 
 Generate a deep dive for the active Codex session:
 
 ```bash
-learnchain --generate-codex-deep-dive
+learnchain deep-dive generate codex
 ```
 
 Target a specific Codex session id explicitly:
 
 ```bash
-learnchain --generate-codex-deep-dive --codex-thread-id <thread-id>
+learnchain deep-dive generate codex --thread-id <thread-id>
 ```
 
-The command writes the markdown artifact to `output/deep-dives/` and prints the saved path, title, goal, and accomplishment bullets to stdout for Codex to relay back in chat.
+The command writes the markdown artifact to `output/deep-dives/` and prints the saved path, title, goal, and accomplishment bullets to stdout for the active coding agent to relay back in chat. The command still resolves Codex sessions, but generation uses whichever provider is selected in LearnChain config, including `Claude Code CLI`.
 
 To generate and immediately export the deep dive to the configured document repository:
 
 ```bash
-learnchain --generate-codex-deep-dive --export-to-document-repository
+learnchain deep-dive generate codex --export
 ```
 
 That uses the same repository settings as the Library export flow and prints the repository label plus remote URL when the export succeeds.
@@ -110,7 +110,7 @@ That uses the same repository settings as the Library export flow and prints the
 To install the real Codex skill into your local Codex skills directory:
 
 ```bash
-learnchain --install-codex-deep-dive-skill
+learnchain skill install codex
 ```
 
 This writes the bundled `learnchain-deep-dive` skill into `$CODEX_HOME/skills` when `CODEX_HOME` is set, or `~/.codex/skills` otherwise. Restart Codex after installation so it reloads available skills.
@@ -118,10 +118,10 @@ This writes the bundled `learnchain-deep-dive` skill into `$CODEX_HOME/skills` w
 If you want the copy/paste custom-command template as well, print it with:
 
 ```bash
-learnchain --print-codex-deep-dive-action
+learnchain action print codex
 ```
 
-That template tells Codex to run LearnChain with `--codex-thread-id "$CODEX_THREAD_ID"` and return the saved path plus a short summary.
+That template tells Codex to run LearnChain with `--thread-id "$CODEX_THREAD_ID"` and return the saved path plus a short summary.
 
 ## Usage
 
@@ -180,16 +180,16 @@ cargo run
 cargo run -- --debug
 
 # Generate a deep dive for the active Codex session
-cargo run -- --generate-codex-deep-dive
+cargo run -- deep-dive generate codex
 
 # Generate and export a deep dive for the active Codex session
-cargo run -- --generate-codex-deep-dive --export-to-document-repository
+cargo run -- deep-dive generate codex --export
 
 # Install the bundled Codex skill
-cargo run -- --install-codex-deep-dive-skill
+cargo run -- skill install codex
 
 # Print the Codex custom command template
-cargo run -- --print-codex-deep-dive-action
+cargo run -- action print codex
 
 # Run tests with output
 cargo test -- --nocapture

@@ -1,6 +1,6 @@
 use crate::{
-    App, AppView, SessionSelectionTarget, llm, log_util::log_debug, output_manager::OutputManager,
-    session_sources::Session,
+    App, AppView, SessionSelectionTarget, document_repository, llm, log_util::log_debug,
+    output_manager::OutputManager, session_sources::Session,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -59,6 +59,9 @@ impl<'a> DeepDiveManager<'a> {
             (KeyModifiers::NONE, KeyCode::PageDown) => self.scroll_down(12),
             (KeyModifiers::NONE, KeyCode::PageUp) => self.scroll_up(12),
             (KeyModifiers::NONE, KeyCode::Char('h')) => self.open_history(),
+            (KeyModifiers::NONE, KeyCode::Char('x')) | (KeyModifiers::NONE, KeyCode::Char('X')) => {
+                self.export_current_document()
+            }
             (KeyModifiers::NONE, KeyCode::Backspace) => self.close_history_document(),
             (KeyModifiers::NONE, KeyCode::Char('m')) => self.app.return_to_menu(),
             _ => {}
@@ -146,6 +149,17 @@ impl<'a> DeepDiveManager<'a> {
                 );
             }
         }
+    }
+
+    fn export_current_document(&mut self) {
+        let Some(document) = self.app.active_deep_dive_document().cloned() else {
+            App::push_error(
+                &mut self.app.error,
+                "No deep dive available to publish.".to_string(),
+            );
+            return;
+        };
+        document_repository::trigger_deep_dive_export(self.app, document);
     }
 
     fn select_next_history(&mut self) {

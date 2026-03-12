@@ -13,6 +13,7 @@ use rig::{
     providers::{anthropic, openai, openrouter},
 };
 use schemars::JsonSchema;
+use serde::Deserialize;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::{io::AsyncWriteExt, process::Command};
@@ -77,6 +78,7 @@ enum RigProviderClient {
 enum BackendClient {
     Rig(RigProviderClient),
     CodexCli,
+    ClaudeCodeCli,
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +117,7 @@ impl LlmBackend {
                 ))
             }
             AiProvider::CodexCli => BackendClient::CodexCli,
+            AiProvider::ClaudeCodeCli => BackendClient::ClaudeCodeCli,
         };
 
         Ok(Self {
@@ -267,6 +270,10 @@ impl LlmBackend {
                 self.extract_with_codex_cli::<T>(preamble, prompt, error_context, options)
                     .await
             }
+            BackendClient::ClaudeCodeCli => {
+                self.extract_with_claude_code_cli::<T>(preamble, prompt, error_context, options)
+                    .await
+            }
         }
     }
 
@@ -286,6 +293,27 @@ impl LlmBackend {
             .await;
         remove_schema_file(&schema_path);
         result
+    }
+
+    async fn extract_with_claude_code_cli<T>(
+        &self,
+        preamble: &str,
+        prompt: &str,
+        error_context: &str,
+        options: LlmRequestOptions,
+    ) -> Result<(T, Option<LlmUsage>)>
+    where
+        T: DeserializeOwned + Serialize + JsonSchema + Send + Sync + 'static,
+    {
+        let schema_json = build_output_schema_json::<T>()?;
+        self.run_claude_code_cli_request::<T>(
+            &schema_json,
+            preamble,
+            prompt,
+            error_context,
+            options,
+        )
+        .await
     }
 
     async fn run_codex_cli_request<T>(
@@ -363,6 +391,50 @@ impl LlmBackend {
         parse_codex_exec_output::<T>(&stdout_text, error_context, &stderr_text)
     }
 
+    async fn run_claude_code_cli_request<T>(
+        &self,
+        schema_json: &str,
+        preamble: &str,
+        prompt: &str,
+        error_context: &str,
+        options: LlmRequestOptions,
+    ) -> Result<(T, Option<LlmUsage>)>
+    where
+        T: DeserializeOwned + Serialize + JsonSchema + Send + Sync + 'static,
+    {
+        let mut command = build_claude_code_cli_command(schema_json, preamble, prompt);
+        let output = tokio::time::timeout(options.timeout, command.output())
+            .await
+            .map_err(|_| {
+                eyre!(
+                    "Claude Code CLI request timed out after {} seconds while extracting {}",
+                    options.timeout.as_secs(),
+                    error_context
+                )
+            })?
+            .wrap_err("failed to collect Claude Code CLI output")?;
+
+        let stderr_text = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !output.status.success() {
+            return Err(eyre!(claude_code_error_message(
+                format!(
+                    "Claude Code CLI exited with status {} while extracting {}",
+                    output
+                        .status
+                        .code()
+                        .map(|code| code.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    error_context
+                ),
+                &stderr_text,
+            )));
+        }
+
+        let stdout_text = String::from_utf8(output.stdout)
+            .wrap_err("Claude Code CLI stdout was not valid UTF-8")?;
+        parse_claude_code_cli_output::<T>(&stdout_text, error_context, &stderr_text)
+    }
+
     fn write_codex_schema_file<T>(&self) -> Result<PathBuf>
     where
         T: JsonSchema,
@@ -384,7 +456,7 @@ impl LlmBackend {
             std::process::id(),
             timestamp
         ));
-        let schema_json = build_codex_output_schema_json::<T>()?;
+        let schema_json = build_output_schema_json::<T>()?;
         fs::write(&path, schema_json)
             .wrap_err_with(|| format!("failed to write Codex schema to {}", path.display()))?;
         Ok(path)
@@ -484,7 +556,7 @@ fn apply_codex_cli_overrides(command: &mut Command, options: LlmRequestOptions) 
     }
 }
 
-fn build_codex_output_schema_json<T>() -> Result<String>
+fn build_output_schema_json<T>() -> Result<String>
 where
     T: JsonSchema,
 {
@@ -493,6 +565,28 @@ where
         serde_json::to_value(schema).wrap_err("failed to convert Codex schema to JSON value")?;
     normalize_codex_schema_value(&mut schema_value);
     serde_json::to_string_pretty(&schema_value).wrap_err("failed to serialize Codex schema")
+}
+
+fn build_claude_code_cli_command(schema_json: &str, preamble: &str, prompt: &str) -> Command {
+    let mut command = Command::new("claude");
+    command
+        .kill_on_drop(true)
+        .arg("-p")
+        .arg("--output-format")
+        .arg("json")
+        .arg("--json-schema")
+        .arg(schema_json)
+        .arg("--system-prompt")
+        .arg(preamble.trim())
+        .arg("--tools")
+        .arg("")
+        .arg("--permission-mode")
+        .arg("plan")
+        .arg(prompt.trim())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
 }
 
 fn normalize_codex_schema_value(value: &mut serde_json::Value) {
@@ -627,6 +721,84 @@ where
 }
 
 fn codex_error_message(message: String, stderr: &str) -> String {
+    if stderr.trim().is_empty() {
+        message
+    } else {
+        format!("{} | stderr: {}", message, stderr.trim())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeCodeCliUsage {
+    #[serde(default)]
+    input_tokens: u64,
+    #[serde(default)]
+    output_tokens: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeCodeCliEnvelope<T> {
+    #[serde(default)]
+    is_error: bool,
+    subtype: Option<String>,
+    result: Option<String>,
+    structured_output: Option<T>,
+    usage: Option<ClaudeCodeCliUsage>,
+}
+
+fn parse_claude_code_cli_output<T>(
+    stdout: &str,
+    error_context: &str,
+    stderr: &str,
+) -> Result<(T, Option<LlmUsage>)>
+where
+    T: DeserializeOwned,
+{
+    let envelope: ClaudeCodeCliEnvelope<T> =
+        serde_json::from_str(stdout.trim()).map_err(|err| {
+            eyre!(claude_code_error_message(
+                format!(
+                    "failed to parse Claude Code CLI JSON output while extracting {}: {}",
+                    error_context, err
+                ),
+                stderr,
+            ))
+        })?;
+
+    if envelope.is_error {
+        let detail = envelope
+            .result
+            .or(envelope.subtype)
+            .unwrap_or_else(|| "unknown Claude Code CLI error".to_string());
+        return Err(eyre!(claude_code_error_message(
+            format!(
+                "Claude Code CLI returned an error while extracting {}: {}",
+                error_context, detail
+            ),
+            stderr,
+        )));
+    }
+
+    let usage = envelope.usage.map(|usage| LlmUsage {
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        total_tokens: usage.input_tokens + usage.output_tokens,
+    });
+
+    let response = envelope.structured_output.ok_or_else(|| {
+        eyre!(claude_code_error_message(
+            format!(
+                "Claude Code CLI did not return structured_output while extracting {}",
+                error_context
+            ),
+            stderr,
+        ))
+    })?;
+
+    Ok((response, usage))
+}
+
+fn claude_code_error_message(message: String, stderr: &str) -> String {
     if stderr.trim().is_empty() {
         message
     } else {
@@ -796,6 +968,19 @@ mod tests {
     }
 
     #[test]
+    fn resolved_llm_factory_accepts_claude_code_cli_without_api_key() {
+        let resolved = ResolvedLlmConfig {
+            provider: AiProvider::ClaudeCodeCli,
+            model_name: "claude-code-print".to_string(),
+            model_label: "CLI default".to_string(),
+            api_key: String::new(),
+        };
+
+        let result = LlmBackend::from_config(resolved, "output");
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn build_prompt_includes_summary_without_raw_schema() {
         let prompt = build_learning_prompt("## Session\nUpdated foo.rs");
         assert!(prompt.contains("Updated foo.rs"));
@@ -830,6 +1015,36 @@ mod tests {
         assert!(args.contains(&"exec".to_string()));
         assert!(args.contains(&"-c".to_string()));
         assert!(args.contains(&"model_reasoning_effort=\"low\"".to_string()));
+    }
+
+    #[test]
+    fn build_claude_code_cli_command_sets_expected_flags() {
+        let command = build_claude_code_cli_command(
+            "{\"type\":\"object\"}",
+            "Follow the schema",
+            "Return a quiz",
+        );
+
+        let program = command.as_std().get_program().to_string_lossy().to_string();
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(program, "claude");
+        assert!(args.contains(&"-p".to_string()));
+        assert!(args.contains(&"--output-format".to_string()));
+        assert!(args.contains(&"json".to_string()));
+        assert!(args.contains(&"--json-schema".to_string()));
+        assert!(args.contains(&"{\"type\":\"object\"}".to_string()));
+        assert!(args.contains(&"--system-prompt".to_string()));
+        assert!(args.contains(&"Follow the schema".to_string()));
+        assert!(args.contains(&"--tools".to_string()));
+        assert!(args.contains(&"".to_string()));
+        assert!(args.contains(&"--permission-mode".to_string()));
+        assert!(args.contains(&"plan".to_string()));
+        assert!(args.contains(&"Return a quiz".to_string()));
     }
 
     #[test]
@@ -908,9 +1123,84 @@ mod tests {
     }
 
     #[test]
+    fn parse_claude_code_cli_output_returns_structured_response_and_usage() {
+        let stdout = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"response":[{"knowledge_type_group":"Rust ownership","summary":"Borrowing basics","quiz":[],"knowledge_type_language":"Rust"}]},"usage":{"input_tokens":120,"output_tokens":40}}"#;
+
+        let (response, usage) = parse_claude_code_cli_output::<StructuredLearningResponse>(
+            stdout,
+            "structured learning response",
+            "",
+        )
+        .unwrap();
+
+        assert_eq!(response.response.len(), 1);
+        assert_eq!(response.response[0].knowledge_type_group, "Rust ownership");
+        assert_eq!(
+            usage,
+            Some(LlmUsage {
+                input_tokens: 120,
+                output_tokens: 40,
+                total_tokens: 160,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_claude_code_cli_output_rejects_malformed_json() {
+        let result = parse_claude_code_cli_output::<StructuredLearningResponse>(
+            "not-json",
+            "structured learning response",
+            "",
+        );
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("failed to parse Claude Code CLI JSON output")
+        );
+    }
+
+    #[test]
+    fn parse_claude_code_cli_output_requires_structured_output() {
+        let stdout = r#"{"type":"result","subtype":"success","is_error":false,"result":""}"#;
+
+        let result = parse_claude_code_cli_output::<StructuredLearningResponse>(
+            stdout,
+            "structured learning response",
+            "",
+        );
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("did not return structured_output")
+        );
+    }
+
+    #[test]
+    fn parse_claude_code_cli_output_rejects_invalid_structured_payload() {
+        let stdout = r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"response":"invalid"}}"#;
+
+        let result = parse_claude_code_cli_output::<StructuredLearningResponse>(
+            stdout,
+            "structured learning response",
+            "",
+        );
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("failed to parse Claude Code CLI JSON output")
+        );
+    }
+
+    #[test]
     fn structured_learning_response_schema_generation_succeeds() {
         let schema_json = serde_json::from_str::<serde_json::Value>(
-            &build_codex_output_schema_json::<StructuredLearningResponse>().unwrap(),
+            &build_output_schema_json::<StructuredLearningResponse>().unwrap(),
         )
         .unwrap();
         assert!(schema_json.is_object());
@@ -919,7 +1209,7 @@ mod tests {
     #[test]
     fn codex_schema_marks_all_properties_as_required_recursively() {
         let schema_json = serde_json::from_str::<serde_json::Value>(
-            &build_codex_output_schema_json::<StructuredLearningResponse>().unwrap(),
+            &build_output_schema_json::<StructuredLearningResponse>().unwrap(),
         )
         .unwrap();
 
