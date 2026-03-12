@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-03-12
+
+### Added
+
+- Added headless CLI commands for config updates, deep-dive generation, bundled skill installation, and Codex action template printing.
+- Added first-time LearnChain account setup, persisted LearnChain authentication, and LearnChain document export support alongside existing repository flows.
+- Added bundled Claude Code skill support, Claude deep-dive generation, and broader Claude Code CLI integration across session parsing and LLM execution.
+
+### Changed
+
+- Expanded deep-dive generation and document export handling with richer research bundles, configurable sections, and stronger repository plumbing.
+- Reworked the terminal UI and menu/config flows to surface onboarding, skill installation, and publish-ready guidance more clearly.
+- Refreshed the README, bundled skills, and install assets to document the new CLI and LearnChain setup workflows.
+
+### Fixed
+
+- Hardened the npm publish workflow with release-tag version alignment and OTP-aware publishing steps.
+
 ## [0.3.0] - 2026-03-09
 
 ### Added
