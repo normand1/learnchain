@@ -2853,10 +2853,13 @@ mod tests {
                     event_kind: SessionEventKind::ToolCall,
                     call_id: Some("call_read".to_string()),
                     tool_name: Some("exec_command".to_string()),
-                    arguments: Some(format!(
-                        "{{\"cmd\":\"sed -n '3,6p' src/llm/deep_dive.rs\",\"workdir\":\"{}\"}}",
-                        root.display()
-                    )),
+                    arguments: Some(
+                        serde_json::json!({
+                            "cmd": "sed -n '3,6p' src/llm/deep_dive.rs",
+                            "workdir": root.display().to_string(),
+                        })
+                        .to_string(),
+                    ),
                     output: None,
                     result_metadata: None,
                     content_texts: Vec::new(),
@@ -2910,10 +2913,14 @@ mod tests {
                 event_kind: SessionEventKind::Message,
                 call_id: Some("tool_read".to_string()),
                 tool_name: Some("Read".to_string()),
-                arguments: Some(format!(
-                    "{{\"file_path\":\"{}\",\"offset\":3,\"limit\":4}}",
-                    file_path.display()
-                )),
+                arguments: Some(
+                    serde_json::json!({
+                        "file_path": file_path.display().to_string(),
+                        "offset": 3,
+                        "limit": 4,
+                    })
+                    .to_string(),
+                ),
                 output: None,
                 result_metadata: None,
                 content_texts: vec!["tool: Read".to_string(), format!("cwd: {}", root.display())],
@@ -2965,10 +2972,15 @@ mod tests {
                 event_kind: SessionEventKind::Message,
                 call_id: Some("tool_edit".to_string()),
                 tool_name: Some("Edit".to_string()),
-                arguments: Some(format!(
-                    "{{\"replace_all\":false,\"file_path\":\"{}\",\"old_string\":\"const browserosInFlightRef = React.useRef(false);\\nconst browserosRunPromiseRef = React.useRef(null);\",\"new_string\":\"const browserosInFlightRef = React.useRef(false);\\nconst browserosRunStartedAtRef = React.useRef(0);\\nconst browserosRunPromiseRef = React.useRef(null);\"}}",
-                    file_path.display()
-                )),
+                arguments: Some(
+                    serde_json::json!({
+                        "replace_all": false,
+                        "file_path": file_path.display().to_string(),
+                        "old_string": "const browserosInFlightRef = React.useRef(false);\nconst browserosRunPromiseRef = React.useRef(null);",
+                        "new_string": "const browserosInFlightRef = React.useRef(false);\nconst browserosRunStartedAtRef = React.useRef(0);\nconst browserosRunPromiseRef = React.useRef(null);",
+                    })
+                    .to_string(),
+                ),
                 output: None,
                 result_metadata: None,
                 content_texts: vec!["tool: Edit".to_string(), format!("cwd: {}", root.display())],
