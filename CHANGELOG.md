@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.2] - 2026-03-12
+
+### Changed
+
+- Moved `Generate session deep dive` to the top of the main action list so the document workflow is the default menu path.
+- Added the app version to the main menu header so the running build is visible inside the TUI.
+
+### Fixed
+
+- Made Claude deep-dive reference extraction tests platform-safe by generating valid JSON tool arguments on Windows and Unix.
+
 ## [0.4.0] - 2026-03-12
 
 ### Added

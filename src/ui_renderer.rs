@@ -60,7 +60,7 @@ impl<'a> UiRenderer<'a> {
         } else {
             &app.active_quiz_session_date
         };
-        let header_title = Line::from(format!("{} • {}", session_title, quiz_session_date))
+        let header_title = Line::from(menu_header_title(session_title, quiz_session_date))
             .bold()
             .blue()
             .centered();
@@ -3263,6 +3263,16 @@ fn format_tokens(tokens: usize) -> String {
     }
 }
 
+fn menu_header_title(session_title: &str, quiz_session_date: &str) -> String {
+    let mut parts = vec![format!("LearnChain v{}", env!("CARGO_PKG_VERSION"))];
+    parts.push(session_title.to_string());
+    let trimmed_date = quiz_session_date.trim();
+    if !trimmed_date.is_empty() {
+        parts.push(trimmed_date.to_string());
+    }
+    parts.join(" • ")
+}
+
 fn strip_leading_toml_front_matter(markdown: &str) -> &str {
     let mut lines = markdown.split_inclusive('\n');
     let Some(first_line) = lines.next() else {
@@ -3288,7 +3298,7 @@ fn strip_leading_toml_front_matter(markdown: &str) -> &str {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{UiRenderer, strip_leading_toml_front_matter};
+    use super::{UiRenderer, menu_header_title, strip_leading_toml_front_matter};
     use crate::{
         session_analytics::{
             AdjustmentKind, AdjustmentMarker, ExternalResourceKind, ExternalResourceRef,
@@ -3313,6 +3323,29 @@ mod tests {
         let stripped = strip_leading_toml_front_matter(markdown);
 
         assert_eq!(stripped, markdown);
+    }
+
+    #[test]
+    fn menu_header_title_includes_version_and_date() {
+        let title = menu_header_title("Codex Sessions", "2026-03-12");
+
+        assert_eq!(
+            title,
+            format!(
+                "LearnChain v{} • Codex Sessions • 2026-03-12",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+    }
+
+    #[test]
+    fn menu_header_title_omits_blank_date() {
+        let title = menu_header_title("Claude Sessions", "");
+
+        assert_eq!(
+            title,
+            format!("LearnChain v{} • Claude Sessions", env!("CARGO_PKG_VERSION"))
+        );
     }
 
     #[test]

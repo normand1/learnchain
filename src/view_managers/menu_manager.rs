@@ -60,14 +60,14 @@ pub(crate) fn menu_options(app: &App) -> Vec<MenuOption> {
 
     push_option(
         MenuOptionSection::Actions,
-        MenuOptionAction::GenerateQuiz,
-        "Generate quiz",
+        MenuOptionAction::GenerateSessionDeepDive,
+        "Generate session deep dive",
         false,
     );
     push_option(
         MenuOptionSection::Actions,
-        MenuOptionAction::GenerateSessionDeepDive,
-        "Generate session deep dive",
+        MenuOptionAction::GenerateQuiz,
+        "Generate quiz",
         false,
     );
     push_option(
@@ -302,6 +302,7 @@ mod tests {
         let options = menu_options(&app);
 
         assert_eq!(options[0].action, MenuOptionAction::LearnChainSetup);
+        assert_eq!(options[1].action, MenuOptionAction::GenerateSessionDeepDive);
     }
 
     #[test]
@@ -314,7 +315,8 @@ mod tests {
         let options = menu_options(&app);
 
         assert_ne!(options[0].action, MenuOptionAction::LearnChainSetup);
-        assert_eq!(options[0].action, MenuOptionAction::GenerateQuiz);
+        assert_eq!(options[0].action, MenuOptionAction::GenerateSessionDeepDive);
+        assert_eq!(options[1].action, MenuOptionAction::GenerateQuiz);
     }
 
     #[test]
@@ -327,5 +329,18 @@ mod tests {
         MenuManager::new(&mut app).handle_menu_key(KeyEvent::from(KeyCode::Char('1')));
 
         assert_eq!(app.view, AppView::LearnChainSetup);
+    }
+
+    #[test]
+    fn quick_selection_uses_deep_dive_number_after_setup() {
+        let mut app = test_app();
+        app.config_form.document_repository = config::DocumentRepositoryKind::LearnChain;
+        app.config_form.learnchain_access_token.clear();
+        app.config_form.learnchain_refresh_token.clear();
+
+        MenuManager::new(&mut app).handle_menu_key(KeyEvent::from(KeyCode::Char('2')));
+
+        assert_eq!(app.view, AppView::SessionPicker);
+        assert_eq!(app.session_selection_target, Some(SessionSelectionTarget::DeepDive));
     }
 }
