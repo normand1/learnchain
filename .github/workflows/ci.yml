@@ -20,6 +20,7 @@ concurrency:
 jobs:
   fmt:
     name: fmt
+    if: ${{ github.event_name != 'push' || !(startsWith(github.event.head_commit.message, 'Prepare v') && endsWith(github.event.head_commit.message, ' release')) }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -34,6 +35,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
   clippy:
     name: clippy
+    if: ${{ github.event_name != 'push' || !(startsWith(github.event.head_commit.message, 'Prepare v') && endsWith(github.event.head_commit.message, ' release')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -54,6 +56,7 @@ jobs:
     # https://doc.rust-lang.org/beta/unstable-book/language-features/doc-cfg.html which allows an
     # API be documented as only available in some specific platforms.
     name: doc
+    if: ${{ github.event_name != 'push' || !(startsWith(github.event.head_commit.message, 'Prepare v') && endsWith(github.event.head_commit.message, ' release')) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -64,6 +67,7 @@ jobs:
         env:
           RUSTDOCFLAGS: --cfg docsrs
   test:
+    if: ${{ github.event_name != 'push' || !(startsWith(github.event.head_commit.message, 'Prepare v') && endsWith(github.event.head_commit.message, ' release')) }}
     runs-on: ${{ matrix.os }}
     name: test ${{ matrix.os }}
     strategy:
