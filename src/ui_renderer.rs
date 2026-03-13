@@ -3345,7 +3345,10 @@ mod tests {
 
         assert_eq!(
             title,
-            format!("LearnChain v{} • Claude Sessions", env!("CARGO_PKG_VERSION"))
+            format!(
+                "LearnChain v{} • Claude Sessions",
+                env!("CARGO_PKG_VERSION")
+            )
         );
     }
 
