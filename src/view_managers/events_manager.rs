@@ -102,16 +102,16 @@ impl<'a> EventsManager<'a> {
             return;
         }
 
-        if let Some(idx) = self.app.selected_session {
-            if let Some(session) = self.app.sessions.get(idx) {
-                self.app.events = session.events.clone();
-                self.app.selected_event = if session.events.is_empty() {
-                    None
-                } else {
-                    Some(0)
-                };
-                self.app.viewing_sessions_list = false;
-            }
+        if let Some(idx) = self.app.selected_session
+            && let Some(session) = self.app.sessions.get(idx)
+        {
+            self.app.events = session.events.clone();
+            self.app.selected_event = if session.events.is_empty() {
+                None
+            } else {
+                Some(0)
+            };
+            self.app.viewing_sessions_list = false;
         }
     }
 

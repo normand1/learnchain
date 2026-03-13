@@ -558,7 +558,7 @@ mod tests {
     #[test]
     fn parse_claude_tool_use_preserves_edit_write_and_multiedit_inputs() {
         let path = unique_temp_file("claude-tool-use");
-        let lines = vec![
+        let lines = [
             serde_json::json!({
                 "timestamp": "2026-03-10T12:00:00Z",
                 "cwd": "/workspace/learnchain",

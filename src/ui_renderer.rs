@@ -754,9 +754,10 @@ impl<'a> UiRenderer<'a> {
             );
         }
 
-        let mut footer_lines = Vec::new();
-        footer_lines.push("Press r to refresh analytics.".to_string());
-        footer_lines.push("Press m to return to the main menu.".to_string());
+        let footer_lines = [
+            "Press r to refresh analytics.".to_string(),
+            "Press m to return to the main menu.".to_string(),
+        ];
         frame.render_widget(
             Paragraph::new(footer_lines.join("\n"))
                 .style(Style::default().fg(Color::Rgb(180, 205, 255)))
@@ -781,7 +782,7 @@ impl<'a> UiRenderer<'a> {
             .first()
             .map(|day| day.date)
             .unwrap_or_else(|| Utc::now().date_naive() - Duration::days(29));
-        let weeks = cmp::max((snapshot.daily.len() + 6) / 7, 1);
+        let weeks = cmp::max(snapshot.daily.len().div_ceil(7), 1);
         let mut grid: Vec<Vec<Option<&DailyAnalytics>>> = vec![vec![None; weeks]; 7];
 
         for day in &snapshot.daily {
@@ -1104,7 +1105,7 @@ impl<'a> UiRenderer<'a> {
 
     fn group_bar_lines(snapshot: &KnowledgeAnalytics) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
-        let weeks = (snapshot.daily.len() + 6) / 7;
+        let weeks = snapshot.daily.len().div_ceil(7);
         if weeks == 0 {
             lines.push(Line::from(vec![Span::styled(
                 "No knowledge group activity yet.",
@@ -3279,15 +3280,15 @@ fn strip_leading_toml_front_matter(markdown: &str) -> &str {
         return markdown;
     };
 
-    if first_line.trim_end_matches(|ch| ch == '\r' || ch == '\n') != "+++" {
+    if first_line.trim_end_matches(['\r', '\n']) != "+++" {
         return markdown;
     }
 
     let mut offset = first_line.len();
     for line in lines {
         offset += line.len();
-        if line.trim_end_matches(|ch| ch == '\r' || ch == '\n') == "+++" {
-            return markdown[offset..].trim_start_matches(|ch| ch == '\r' || ch == '\n');
+        if line.trim_end_matches(['\r', '\n']) == "+++" {
+            return markdown[offset..].trim_start_matches(['\r', '\n']);
         }
     }
 

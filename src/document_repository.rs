@@ -1667,8 +1667,6 @@ fn learnchain_filename(title: &str) -> String {
         .map(|ch| {
             if ch.is_ascii_alphanumeric() {
                 ch.to_ascii_lowercase()
-            } else if ch.is_whitespace() || matches!(ch, '-' | '_') {
-                '-'
             } else {
                 '-'
             }
