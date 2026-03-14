@@ -684,7 +684,7 @@ fn normalize_learnchain_site_url(site_url: &str) -> String {
         let host = url.host_str().unwrap_or_default();
         if matches!(host, "learnchain.co" | "www.learnchain.co") {
             let _ = url.set_scheme("https");
-            let _ = url.set_host(Some("www.learnchain.co"));
+            let _ = url.set_host(Some("learnchain.co"));
             return url.to_string().trim_end_matches('/').to_string();
         }
     }

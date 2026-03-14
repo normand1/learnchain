@@ -251,7 +251,7 @@ impl DocumentRepositoryKind {
 
 const DEFAULT_MAX_EVENTS: usize = 15;
 const DEFAULT_MIN_QUIZ_QUESTIONS: usize = 5;
-pub(crate) const LEARNCHAIN_DEFAULT_SITE_URL: &str = "http://localhost:3000";
+pub(crate) const LEARNCHAIN_DEFAULT_SITE_URL: &str = "https://learnchain.co";
 const fn default_session_source_kind() -> SessionSourceKind {
     SessionSourceKind::Codex
 }
@@ -1302,14 +1302,28 @@ impl ConfigForm {
     }
 
     pub(crate) fn apply_learnchain_site_url_edit(&mut self) {
+        let requested_default = self.learnchain_site_url_buffer.trim().is_empty();
         let new_value = normalize_learnchain_site_url(&self.learnchain_site_url_buffer);
         if new_value != self.learnchain_site_url {
             self.learnchain_site_url = new_value;
             self.clear_learnchain_auth_feedback();
             self.dirty = true;
+            self.status = Some(if requested_default {
+                format!(
+                    "Reset LearnChain site URL to the default ({}). Dashboard: {}",
+                    LEARNCHAIN_DEFAULT_SITE_URL,
+                    learnchain_dashboard_url(&self.learnchain_site_url)
+                )
+            } else {
+                format!(
+                    "Updated LearnChain site URL. Dashboard: {}",
+                    learnchain_dashboard_url(&self.learnchain_site_url)
+                )
+            });
+        } else if requested_default {
             self.status = Some(format!(
-                "Updated LearnChain site URL. Dashboard: {}",
-                learnchain_dashboard_url(&self.learnchain_site_url)
+                "LearnChain site URL already matches the default ({}).",
+                LEARNCHAIN_DEFAULT_SITE_URL
             ));
         } else {
             self.status = Some("LearnChain site URL unchanged.".to_string());
@@ -1665,8 +1679,10 @@ pub(crate) fn claude_code_cli_config_help_message() -> &'static str {
 
 pub(crate) fn validate_learnchain_site_url(value: &str) -> std::result::Result<(), String> {
     let normalized = normalize_learnchain_site_url(value);
-    let url = reqwest::Url::parse(&normalized)
-        .map_err(|_| "Enter a valid LearnChain URL like http://localhost:3000.".to_string())?;
+    let url = reqwest::Url::parse(&normalized).map_err(|_| {
+        "Enter a valid LearnChain URL like https://learnchain.co or http://localhost:3000."
+            .to_string()
+    })?;
 
     match url.scheme() {
         "http" | "https" => Ok(()),
@@ -1715,7 +1731,7 @@ fn normalize_learnchain_site_url(value: &str) -> String {
         let host = url.host_str().unwrap_or_default();
         if matches!(host, "learnchain.co" | "www.learnchain.co") {
             let _ = url.set_scheme("https");
-            let _ = url.set_host(Some("www.learnchain.co"));
+            let _ = url.set_host(Some("learnchain.co"));
             return url.to_string().trim_end_matches('/').to_string();
         }
     }
@@ -2335,14 +2351,32 @@ mod tests {
     }
 
     #[test]
-    fn learnchain_signup_url_canonicalizes_public_host_to_www_https() {
+    fn learnchain_signup_url_canonicalizes_public_host_to_https() {
         assert_eq!(
             learnchain_signup_url("https://learnchain.co/"),
-            "https://www.learnchain.co/login"
+            "https://learnchain.co/login"
         );
         assert_eq!(
             learnchain_dashboard_url("http://learnchain.co"),
-            "https://www.learnchain.co/dashboard"
+            "https://learnchain.co/dashboard"
+        );
+    }
+
+    #[test]
+    fn empty_learnchain_site_url_edit_resets_to_default() {
+        let mut form = ConfigForm::from_config(AppConfig::default());
+        form.learnchain_site_url = "http://localhost:3000".to_string();
+
+        form.start_editing_learnchain_site_url();
+        form.learnchain_site_url_buffer.clear();
+        form.apply_learnchain_site_url_edit();
+
+        assert_eq!(form.learnchain_site_url, LEARNCHAIN_DEFAULT_SITE_URL);
+        assert_eq!(
+            form.status.as_deref(),
+            Some(
+                "Reset LearnChain site URL to the default (https://learnchain.co). Dashboard: https://learnchain.co/dashboard"
+            )
         );
     }
 

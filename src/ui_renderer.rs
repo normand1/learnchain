@@ -315,6 +315,10 @@ impl<'a> UiRenderer<'a> {
                     Line::from("Step 1"),
                     Line::from(""),
                     Line::from("Create a LearnChain account or sign into an existing one."),
+                    Line::from(format!(
+                        "This uses {} by default. You can override that later in Config if you use another LearnChain host.",
+                        config::LEARNCHAIN_DEFAULT_SITE_URL
+                    )),
                     Line::from(""),
                     Line::from(vec![
                         Span::styled("Open: ", Style::default().fg(Color::Rgb(140, 160, 220))),
@@ -2870,7 +2874,10 @@ impl<'a> UiRenderer<'a> {
                 "Stores the credential used for Notion document export.".to_string()
             }
             config::ConfigField::LearnChainSiteUrl => {
-                "Defines which LearnChain server receives uploaded artifacts.".to_string()
+                format!(
+                    "Defines which LearnChain server receives uploaded artifacts. Save an empty value to reset it back to {}.",
+                    config::LEARNCHAIN_DEFAULT_SITE_URL
+                )
             }
             config::ConfigField::LearnChainEmail => {
                 "Shows which LearnChain account is currently linked for export.".to_string()
@@ -3002,8 +3009,15 @@ impl<'a> UiRenderer<'a> {
                 | config::ConfigField::AnthropicKey
                 | config::ConfigField::OpenRouterModel
                 | config::ConfigField::OpenRouterKey => {
-                    "Press Enter to edit this text field. Paste is supported while editing."
-                        .to_string()
+                    if field == config::ConfigField::LearnChainSiteUrl {
+                        format!(
+                            "Press Enter to edit this text field. Paste is supported while editing. Save an empty value to reset it to {}.",
+                            config::LEARNCHAIN_DEFAULT_SITE_URL
+                        )
+                    } else {
+                        "Press Enter to edit this text field. Paste is supported while editing."
+                            .to_string()
+                    }
                 }
                 config::ConfigField::LearnChainEmail => {
                     "Press Enter to clear the stored LearnChain account link.".to_string()
