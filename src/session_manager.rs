@@ -226,12 +226,15 @@ mod tests {
         ));
 
         let mut append_file = OpenOptions::new().append(true).open(&log_path).unwrap();
-        writeln!(
-            append_file,
-            "{}",
-            r#"{"timestamp":"2025-10-05T10:10:00Z","type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"call-2","arguments":{"command":"pwd"}}}"#
-        )
-        .unwrap();
+        append_file
+            .write_all(
+                concat!(
+                    r#"{"timestamp":"2025-10-05T10:10:00Z","type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"call-2","arguments":{"command":"pwd"}}}"#,
+                    "\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
         drop(append_file);
 
         let new_load = manager.load_new_events(latest_file.as_deref(), Some(baseline.as_str()));

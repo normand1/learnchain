@@ -1593,10 +1593,10 @@ impl ConfigForm {
 
     fn sync_field_to_selected_section(&mut self) {
         let visible = self.visible_fields_in_section(self.selected_section);
-        if !visible.contains(&self.field) {
-            if let Some(first) = visible.first().copied() {
-                self.field = first;
-            }
+        if !visible.contains(&self.field)
+            && let Some(first) = visible.first().copied()
+        {
+            self.field = first;
         }
     }
 }

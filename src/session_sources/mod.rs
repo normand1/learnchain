@@ -384,10 +384,10 @@ fn derive_session_summary(events: &[SessionEvent], first_user_prompt: Option<&st
         }
         if event.event_kind == SessionEventKind::ToolCall || event.payload_type == "function_call" {
             // For Codex, try to extract command from arguments
-            if let Some(args) = &event.arguments {
-                if let Some(cmd) = extract_command_from_args(args) {
-                    return format!("Started with: {}", cmd);
-                }
+            if let Some(args) = &event.arguments
+                && let Some(cmd) = extract_command_from_args(args)
+            {
+                return format!("Started with: {}", cmd);
             }
             return "CLI session".to_string();
         }
@@ -410,7 +410,7 @@ fn extract_command_from_args(args: &str) -> Option<String> {
             arr.iter()
                 .filter_map(|v| v.as_str())
                 .filter(|s| !s.starts_with('-') && *s != "bash" && *s != "sh")
-                .last()
+                .next_back()
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| {
                     arr.iter()

@@ -611,7 +611,7 @@ fn extract_claude_tool_file_references(
     }
 }
 
-fn extract_event_cwd<'a>(event: &'a SessionEvent) -> Option<&'a str> {
+fn extract_event_cwd(event: &SessionEvent) -> Option<&str> {
     event.content_texts.iter().find_map(|line| {
         line.strip_prefix("cwd: ")
             .map(str::trim)
@@ -935,7 +935,7 @@ fn extract_command_invocation(arguments: Option<&str>) -> Option<(String, Option
         Some(serde_json::Value::Array(parts)) => parts
             .iter()
             .filter_map(|value| value.as_str())
-            .last()
+            .next_back()
             .map(|value| (value.to_string(), workdir)),
         _ => None,
     }
@@ -1102,9 +1102,7 @@ fn build_snippet_from_hints(path: &Path, hints: &[String]) -> Option<String> {
         }
     }
 
-    let Some(first_match) = matches.iter().min().copied() else {
-        return None;
-    };
+    let first_match = matches.iter().min().copied()?;
     let last_match = matches.iter().max().copied().unwrap_or(first_match);
     let start = first_match.saturating_sub(2);
     let end = (last_match + 4).min(lines.len());

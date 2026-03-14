@@ -92,12 +92,12 @@ fn includes_execution_error(event: &SessionEvent) -> bool {
         .content_texts
         .iter()
         .find_map(|text| non_empty_trimmed(text))
-        .map_or(false, starts_with_execution_error)
+        .is_some_and(starts_with_execution_error)
         || event
             .output
             .as_deref()
             .and_then(non_empty_trimmed)
-            .map_or(false, starts_with_execution_error)
+            .is_some_and(starts_with_execution_error)
 }
 
 fn includes_operation_not_permitted(event: &SessionEvent) -> bool {
@@ -108,11 +108,11 @@ fn includes_operation_not_permitted(event: &SessionEvent) -> bool {
         || event
             .output
             .as_deref()
-            .map_or(false, contains_operation_not_permitted)
+            .is_some_and(contains_operation_not_permitted)
         || event
             .arguments
             .as_deref()
-            .map_or(false, contains_operation_not_permitted)
+            .is_some_and(contains_operation_not_permitted)
 }
 
 pub(crate) fn includes_problematic_tool_result(event: &SessionEvent) -> bool {
