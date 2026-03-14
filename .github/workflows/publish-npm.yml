@@ -10,7 +10,13 @@ permissions:
   id-token: write
 
 jobs:
+  cross-platform-tests:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/cross-platform-tests.yml
+
   publish:
+    needs: cross-platform-tests
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -20,7 +26,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download release binaries
         run: |
