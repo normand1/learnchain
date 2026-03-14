@@ -26,6 +26,8 @@ jobs:
     if: >-
       ${{
         github.event_name == 'workflow_call' ||
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'workflow_run' ||
         (github.event_name == 'push' &&
           !(startsWith(github.event.head_commit.message, 'Prepare v') &&
             endsWith(github.event.head_commit.message, ' release'))) ||
