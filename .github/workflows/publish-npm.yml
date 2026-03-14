@@ -1,9 +1,17 @@
 name: Publish to npm
 
 on:
-  workflow_dispatch:  # Manual trigger
-  release:
-    types: [published]  # Trigger when a release is published
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish (for example v0.4.3)
+        required: true
+        type: string
+  workflow_run:
+    workflows:
+      - Build Binaries
+    types:
+      - completed
 
 permissions:
   contents: read  # Required to download release assets
@@ -17,6 +25,12 @@ jobs:
 
   publish:
     needs: cross-platform-tests
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'workflow_run' &&
+          github.event.workflow_run.conclusion == 'success')
+      }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -27,17 +41,42 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-      - name: Download release binaries
+      - name: Resolve release tag
+        id: release_tag
         run: |
-          # Get the latest release tag
-          TAG=${GITHUB_REF#refs/tags/}
-          if [ -z "$TAG" ] || [ "$TAG" = "$GITHUB_REF" ]; then
-            TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+            TAG=$(git tag --points-at "$HEAD_SHA" | grep '^v' | sort -V | tail -n 1 || true)
+
+            if [ -z "$TAG" ]; then
+              echo "No version tag points at workflow SHA $HEAD_SHA. Skipping npm publish."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           fi
 
-          echo "Downloading binaries from release: $TAG"
+          echo "Resolved release tag: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
           echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check out release ref
+        if: steps.release_tag.outputs.skip != 'true'
+        run: |
+          git checkout "${RELEASE_TAG}"
+
+      - name: Download release binaries
+        if: steps.release_tag.outputs.skip != 'true'
+        run: |
+          TAG="$RELEASE_TAG"
+          echo "Downloading binaries from release: $TAG"
 
           # Download all binaries from the release
           mkdir -p dist
@@ -49,17 +88,20 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js
+        if: steps.release_tag.outputs.skip != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Upgrade npm for trusted publishing
+        if: steps.release_tag.outputs.skip != 'true'
         run: |
           npm install -g npm@latest
           npm --version
 
       - name: Align package version with release tag
+        if: steps.release_tag.outputs.skip != 'true'
         run: |
           if [ -z "$RELEASE_TAG" ]; then
             echo "RELEASE_TAG not set" >&2
@@ -81,6 +123,7 @@ jobs:
           fi
 
       - name: Capture package version
+        if: steps.release_tag.outputs.skip != 'true'
         run: |
           VERSION=$(node -p "require('./package.json').version")
           echo "PACKAGE_VERSION=$VERSION" >> "$GITHUB_ENV"
@@ -88,6 +131,7 @@ jobs:
 
       - name: Check npm for existing version
         id: version_check
+        if: steps.release_tag.outputs.skip != 'true'
         run: |
           if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
@@ -98,11 +142,11 @@ jobs:
           fi
 
       - name: Generate launcher script
-        if: steps.version_check.outputs.exists != 'true'
+        if: steps.release_tag.outputs.skip != 'true' && steps.version_check.outputs.exists != 'true'
         run: node scripts/generate-launcher.js
 
       - name: Verify package contents
-        if: steps.version_check.outputs.exists != 'true'
+        if: steps.release_tag.outputs.skip != 'true' && steps.version_check.outputs.exists != 'true'
         run: |
           echo "Preparing npm package: ${PACKAGE_NAME}"
           npm pack --dry-run
@@ -110,8 +154,12 @@ jobs:
           du -sh .
 
       - name: Publish to npm
-        if: steps.version_check.outputs.exists != 'true'
+        if: steps.release_tag.outputs.skip != 'true' && steps.version_check.outputs.exists != 'true'
         run: |
           echo "Publishing ${PACKAGE_NAME} to npm"
           echo "Using trusted publishing via OIDC"
           npm publish --provenance --access public
+
+      - name: Report skipped publish
+        if: steps.release_tag.outputs.skip == 'true'
+        run: echo "Skipping npm publish because the triggering Build Binaries run was not associated with a version tag."
