@@ -51,7 +51,13 @@ jobs:
             TAG="${{ github.event.inputs.tag }}"
           else
             HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
-            TAG=$(git tag --points-at "$HEAD_SHA" | grep '^v' | sort -V | tail -n 1 || true)
+            TAG=$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+              --jq ".[] | select(.draft == false and .prerelease == false and .target_commitish == \"$HEAD_SHA\") | .tag_name" \
+              | head -n 1)
+
+            if [ -z "$TAG" ]; then
+              TAG=$(git tag --points-at "$HEAD_SHA" | grep '^v' | sort -V | tail -n 1 || true)
+            fi
 
             if [ -z "$TAG" ]; then
               echo "No version tag points at workflow SHA $HEAD_SHA. Skipping npm publish."

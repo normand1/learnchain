@@ -1,7 +1,12 @@
 name: Build Binaries
 
 on:
-  workflow_dispatch:  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and publish binaries for (for example v0.4.3)
+        required: true
+        type: string
   push:
     tags:
       - 'v*'  # Trigger on version tags like v0.1.0
@@ -30,8 +35,18 @@ jobs:
             binary_name: learnchain-win32-x64.exe
 
     steps:
+      - name: Resolve release tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "RELEASE_TAG=${{ github.event.inputs.tag }}" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
+          fi
+
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -62,13 +77,27 @@ jobs:
     name: Create Release with Binaries
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      ${{
+        startsWith(github.ref, 'refs/tags/v') ||
+        (github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.tag, 'v'))
+      }}
     permissions:
       contents: write
 
     steps:
+      - name: Resolve release tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "RELEASE_TAG=${{ github.event.inputs.tag }}" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
+          fi
+
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -84,6 +113,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           files: dist/*
           draft: false
           generate_release_notes: true
