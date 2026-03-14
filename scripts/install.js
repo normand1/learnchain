@@ -5,6 +5,8 @@ const path = require('path');
 const projectRoot = path.join(__dirname, '..');
 const platform = process.platform;
 const arch = process.arch;
+const isGlobalInstall =
+  process.env.npm_config_global === 'true' || process.env.npm_config_global === '1';
 
 // Map Node.js platform/arch to our binary naming convention
 const getBinaryName = () => {
@@ -56,8 +58,18 @@ if (platform !== 'win32') {
   }
 }
 
+const commandPrefix = isGlobalInstall ? 'learnchain' : 'npx learnchain';
+const startCommand = isGlobalInstall ? 'learnchain' : 'npx learnchain';
+
 console.log(`✓ learnchain installed successfully for ${platform}-${arch}`);
-console.log('\nRun: npx learnchain --help');
-console.log('Tip: Run `npx learnchain config set openai-key <your-key>` to configure your OpenAI API key.');
-console.log('Codex tip: Run `npx learnchain skill install codex` to install the LearnChain Codex skill.');
-console.log('Codex tip: Run `npx learnchain action print codex` to print the Codex custom command template.');
+console.log('');
+if (isGlobalInstall) {
+  console.log('LearnChain is ready.');
+} else {
+  console.log('LearnChain can be started from this project with npx.');
+}
+console.log(`Start the app: ${startCommand}`);
+console.log(`Help: ${commandPrefix} --help`);
+console.log(`Configure OpenAI: ${commandPrefix} config set openai-key <your-key>`);
+console.log(`Install the Codex skill: ${commandPrefix} skill install codex`);
+console.log('Learn more: https://learnchain.co');

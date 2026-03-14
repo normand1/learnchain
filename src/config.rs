@@ -1,8 +1,8 @@
 use color_eyre::eyre::{Context, Result, eyre};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs, io,
-    path::PathBuf,
+    env, fs, io,
+    path::{Path, PathBuf},
     sync::{OnceLock, RwLock},
 };
 
@@ -302,7 +302,8 @@ All questions should be language specific and should not quiz the user on the im
 Return a minimum of {MIN_QUIZ_QUESTIONS} quiz questions overall.
 Fill every required field in the structured response."#;
 
-const CONFIG_FILE_PATH: &str = "config/app_config.toml";
+const CONFIG_FILE_NAME: &str = "app_config.toml";
+const LEGACY_CONFIG_FILE_PATH: &str = "config/app_config.toml";
 
 static APP_CONFIG: OnceLock<RwLock<AppConfig>> = OnceLock::new();
 
@@ -362,21 +363,47 @@ where
     Ok(config.clone())
 }
 
-/// Absolute path to the configuration file used for persistence.
+/// Primary path used for configuration persistence.
 pub fn config_file_path() -> PathBuf {
-    PathBuf::from(CONFIG_FILE_PATH)
+    global_config_file_path().unwrap_or_else(legacy_config_file_path)
 }
 
 fn load_config_from_disk() -> Result<AppConfig> {
     let path = config_file_path();
-    match fs::read_to_string(&path) {
+    let legacy_path = legacy_config_file_path();
+    load_config_from_paths(&path, &legacy_path)
+}
+
+fn load_config_from_paths(path: &Path, legacy_path: &Path) -> Result<AppConfig> {
+    if let Some(config) = load_config_from_path(&path)? {
+        return Ok(config);
+    }
+
+    if legacy_path != path {
+        if let Some(config) = load_config_from_path(&legacy_path)? {
+            // Best-effort migration so future launches outside the original cwd keep working.
+            let _ = save_config_to_path(&path, &config);
+            return Ok(config);
+        }
+    }
+
+    Ok(AppConfig::default())
+}
+
+fn save_config_to_disk(config: &AppConfig) -> Result<()> {
+    let path = config_file_path();
+    save_config_to_path(&path, config)
+}
+
+fn load_config_from_path(path: &Path) -> Result<Option<AppConfig>> {
+    match fs::read_to_string(path) {
         Ok(contents) => {
             let mut config: AppConfig = toml::from_str(&contents)
                 .wrap_err_with(|| format!("failed to parse configuration at {}", path.display()))?;
             config.normalize();
-            Ok(config)
+            Ok(Some(config))
         }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(AppConfig::default()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(eyre!(format!(
             "failed to read configuration at {}: {}",
             path.display(),
@@ -385,8 +412,7 @@ fn load_config_from_disk() -> Result<AppConfig> {
     }
 }
 
-fn save_config_to_disk(config: &AppConfig) -> Result<()> {
-    let path = config_file_path();
+fn save_config_to_path(path: &Path, config: &AppConfig) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).wrap_err_with(|| {
             format!(
@@ -397,8 +423,59 @@ fn save_config_to_disk(config: &AppConfig) -> Result<()> {
     }
     let serialized =
         toml::to_string_pretty(config).wrap_err("failed to serialize configuration to TOML")?;
-    fs::write(&path, serialized)
+    fs::write(path, serialized)
         .wrap_err_with(|| format!("failed to write configuration to {}", path.display()))
+}
+
+fn legacy_config_file_path() -> PathBuf {
+    PathBuf::from(LEGACY_CONFIG_FILE_PATH)
+}
+
+fn global_config_file_path() -> Option<PathBuf> {
+    global_config_dir().map(|dir| dir.join(CONFIG_FILE_NAME))
+}
+
+fn global_config_dir() -> Option<PathBuf> {
+    resolve_global_config_dir(
+        env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
+        env::var_os("APPDATA").map(PathBuf::from),
+        env::var_os("HOME").map(PathBuf::from),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_global_config_dir(
+    _xdg_config_home: Option<PathBuf>,
+    _appdata: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    home.map(|home| {
+        home.join("Library")
+            .join("Application Support")
+            .join("learnchain")
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_global_config_dir(
+    _xdg_config_home: Option<PathBuf>,
+    appdata: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    appdata
+        .or_else(|| home.map(|home| home.join("AppData").join("Roaming")))
+        .map(|dir| dir.join("LearnChain"))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn resolve_global_config_dir(
+    xdg_config_home: Option<PathBuf>,
+    _appdata: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    xdg_config_home
+        .or_else(|| home.map(|home| home.join(".config")))
+        .map(|dir| dir.join("learnchain"))
 }
 
 const fn default_max_events_value() -> usize {
@@ -1816,6 +1893,7 @@ impl AnthropicModelKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn app_config_resolved_llm_for_openai() {
@@ -2512,5 +2590,89 @@ sampling_percentage = 10
         .unwrap();
 
         assert_eq!(config.ai_provider, AiProvider::ClaudeCodeCli);
+    }
+
+    #[test]
+    fn resolve_global_config_dir_returns_none_without_supported_env_vars() {
+        assert_eq!(resolve_global_config_dir(None, None, None), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resolve_global_config_dir_uses_application_support_on_macos() {
+        let dir = resolve_global_config_dir(None, None, Some(PathBuf::from("/Users/tester")));
+        assert_eq!(
+            dir,
+            Some(PathBuf::from(
+                "/Users/tester/Library/Application Support/learnchain"
+            ))
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn resolve_global_config_dir_uses_appdata_on_windows() {
+        let dir = resolve_global_config_dir(
+            None,
+            Some(PathBuf::from(r"C:\Users\tester\AppData\Roaming")),
+            Some(PathBuf::from(r"C:\Users\tester")),
+        );
+        assert_eq!(
+            dir,
+            Some(PathBuf::from(r"C:\Users\tester\AppData\Roaming\LearnChain"))
+        );
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn resolve_global_config_dir_uses_xdg_or_home_on_unix() {
+        let xdg_dir = resolve_global_config_dir(
+            Some(PathBuf::from("/tmp/config-home")),
+            None,
+            Some(PathBuf::from("/home/tester")),
+        );
+        assert_eq!(xdg_dir, Some(PathBuf::from("/tmp/config-home/learnchain")));
+
+        let home_dir = resolve_global_config_dir(None, None, Some(PathBuf::from("/home/tester")));
+        assert_eq!(
+            home_dir,
+            Some(PathBuf::from("/home/tester/.config/learnchain"))
+        );
+    }
+
+    #[test]
+    fn load_config_from_paths_falls_back_to_legacy_file_and_migrates_it() {
+        let temp = tempdir().unwrap();
+        let primary_path = temp.path().join("global").join("app_config.toml");
+        let legacy_path = temp.path().join("config").join("app_config.toml");
+
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        fs::write(
+            &legacy_path,
+            r#"
+default_max_events = 21
+min_quiz_questions = 5
+session_source = "codex"
+write_output_artifacts = false
+document_repository = "none"
+ai_provider = "codex_cli"
+openai_model = "gpt5-mini"
+openai_api_key = ""
+anthropic_model = "claude-sonnet4"
+anthropic_api_key = ""
+openrouter_model = ""
+openrouter_api_key = ""
+sampling_percentage = 10
+"#,
+        )
+        .unwrap();
+
+        let config = load_config_from_paths(&primary_path, &legacy_path).unwrap();
+        assert_eq!(config.default_max_events, 21);
+        assert_eq!(config.ai_provider, AiProvider::CodexCli);
+
+        let migrated = load_config_from_path(&primary_path).unwrap().unwrap();
+        assert_eq!(migrated.default_max_events, 21);
+        assert_eq!(migrated.ai_provider, AiProvider::CodexCli);
     }
 }

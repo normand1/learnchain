@@ -211,37 +211,58 @@ fn main() -> color_eyre::Result<()> {
         match command {
             CommandAction::SetOpenAiKey(key) => {
                 config::update(|cfg| cfg.openai_api_key = key.trim().to_string())?;
-                println!("Stored OpenAI API key in config/app_config.toml.");
+                println!(
+                    "Stored OpenAI API key in {}.",
+                    config::config_file_path().display()
+                );
                 return Ok(());
             }
             CommandAction::ClearOpenAiKey => {
                 config::update(|cfg| cfg.openai_api_key.clear())?;
-                println!("Cleared OpenAI API key from config/app_config.toml.");
+                println!(
+                    "Cleared OpenAI API key from {}.",
+                    config::config_file_path().display()
+                );
                 return Ok(());
             }
             CommandAction::SetAnthropicKey(key) => {
                 config::update(|cfg| cfg.anthropic_api_key = key.trim().to_string())?;
-                println!("Stored Anthropic API key in config/app_config.toml.");
+                println!(
+                    "Stored Anthropic API key in {}.",
+                    config::config_file_path().display()
+                );
                 return Ok(());
             }
             CommandAction::ClearAnthropicKey => {
                 config::update(|cfg| cfg.anthropic_api_key.clear())?;
-                println!("Cleared Anthropic API key from config/app_config.toml.");
+                println!(
+                    "Cleared Anthropic API key from {}.",
+                    config::config_file_path().display()
+                );
                 return Ok(());
             }
             CommandAction::SetOpenRouterKey(key) => {
                 config::update(|cfg| cfg.openrouter_api_key = key.trim().to_string())?;
-                println!("Stored OpenRouter API key in config/app_config.toml.");
+                println!(
+                    "Stored OpenRouter API key in {}.",
+                    config::config_file_path().display()
+                );
                 return Ok(());
             }
             CommandAction::ClearOpenRouterKey => {
                 config::update(|cfg| cfg.openrouter_api_key.clear())?;
-                println!("Cleared OpenRouter API key from config/app_config.toml.");
+                println!(
+                    "Cleared OpenRouter API key from {}.",
+                    config::config_file_path().display()
+                );
                 return Ok(());
             }
             CommandAction::SetDocumentRepository(repository) => {
                 config::update(|cfg| cfg.document_repository = repository)?;
-                println!("Stored document repository in config/app_config.toml.");
+                println!(
+                    "Stored document repository in {}.",
+                    config::config_file_path().display()
+                );
                 return Ok(());
             }
             CommandAction::ClearDocumentRepository => {
@@ -249,7 +270,10 @@ fn main() -> color_eyre::Result<()> {
                     cfg.document_repository = config::DocumentRepositoryKind::None;
                     cfg.document_repository_target.clear();
                 })?;
-                println!("Cleared document repository from config/app_config.toml.");
+                println!(
+                    "Cleared document repository from {}.",
+                    config::config_file_path().display()
+                );
                 return Ok(());
             }
             CommandAction::SetDocumentRepositoryTarget(target) => {
@@ -258,54 +282,84 @@ fn main() -> color_eyre::Result<()> {
                 config::validate_document_repository_target(current.document_repository, &trimmed)
                     .map_err(|err| color_eyre::eyre::eyre!(err))?;
                 config::update(|cfg| cfg.document_repository_target = trimmed.clone())?;
-                println!("Stored document repository target in config/app_config.toml.");
+                println!(
+                    "Stored document repository target in {}.",
+                    config::config_file_path().display()
+                );
                 return Ok(());
             }
             CommandAction::ClearDocumentRepositoryTarget => {
                 config::update(|cfg| cfg.document_repository_target.clear())?;
-                println!("Cleared document repository target from config/app_config.toml.");
+                println!(
+                    "Cleared document repository target from {}.",
+                    config::config_file_path().display()
+                );
                 return Ok(());
             }
             CommandAction::SetNotionApiToken(token) => {
                 config::update(|cfg| cfg.notion_api_token = token.trim().to_string())?;
-                println!("Stored Notion API token in config/app_config.toml.");
+                println!(
+                    "Stored Notion API token in {}.",
+                    config::config_file_path().display()
+                );
                 return Ok(());
             }
             CommandAction::ClearNotionApiToken => {
                 config::update(|cfg| cfg.notion_api_token.clear())?;
-                println!("Cleared Notion API token from config/app_config.toml.");
+                println!(
+                    "Cleared Notion API token from {}.",
+                    config::config_file_path().display()
+                );
                 return Ok(());
             }
             CommandAction::SetLearnChainSiteUrl(url) => {
                 config::validate_learnchain_site_url(&url)
                     .map_err(|err| color_eyre::eyre::eyre!(err))?;
                 config::update(|cfg| cfg.learnchain_site_url = url.trim().to_string())?;
-                println!("Stored LearnChain site URL in config/app_config.toml.");
+                println!(
+                    "Stored LearnChain site URL in {}.",
+                    config::config_file_path().display()
+                );
                 return Ok(());
             }
             CommandAction::ClearLearnChainSiteUrl => {
                 config::update(|cfg| cfg.learnchain_site_url.clear())?;
-                println!("Reset LearnChain site URL in config/app_config.toml.");
+                println!(
+                    "Reset LearnChain site URL in {}.",
+                    config::config_file_path().display()
+                );
                 return Ok(());
             }
             CommandAction::SetLearnChainEmail(email) => {
                 config::update(|cfg| cfg.learnchain_email = email.trim().to_string())?;
-                println!("Stored LearnChain email in config/app_config.toml.");
+                println!(
+                    "Stored LearnChain email in {}.",
+                    config::config_file_path().display()
+                );
                 return Ok(());
             }
             CommandAction::ClearLearnChainEmail => {
                 config::update(|cfg| cfg.learnchain_email.clear())?;
-                println!("Cleared LearnChain email from config/app_config.toml.");
+                println!(
+                    "Cleared LearnChain email from {}.",
+                    config::config_file_path().display()
+                );
                 return Ok(());
             }
             CommandAction::SetLearnChainPassword(password) => {
                 config::update(|cfg| cfg.learnchain_password = password.clone())?;
-                println!("Stored LearnChain password in config/app_config.toml.");
+                println!(
+                    "Stored LearnChain password in {}.",
+                    config::config_file_path().display()
+                );
                 return Ok(());
             }
             CommandAction::ClearLearnChainPassword => {
                 config::update(|cfg| cfg.learnchain_password.clear())?;
-                println!("Cleared LearnChain password from config/app_config.toml.");
+                println!(
+                    "Cleared LearnChain password from {}.",
+                    config::config_file_path().display()
+                );
                 return Ok(());
             }
             CommandAction::GenerateCodexDeepDive {

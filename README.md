@@ -17,7 +17,7 @@
 - Browse previously generated deep dives from inside the TUI
 - Track learning history and first-attempt accuracy in a local SQLite database
 - Browse an analytics dashboard for recent learning activity
-- Persist configuration in `config/app_config.toml`
+- Persist configuration in a user-global `app_config.toml`
 - Enable per-run debug logging with `--debug`
 
 ## Quick Start
@@ -26,7 +26,12 @@
 
 ```bash
 npm install -g learnchain
+learnchain
+# or
+learnchain --help
 ```
+
+The global install prints a short quick-start with common next steps and links to [learnchain.co](https://learnchain.co).
 
 ### Run from source
 
@@ -235,7 +240,9 @@ See [AGENTS.md](AGENTS.md) for repository-specific development guidelines.
 
 ## Configuration
 
-LearnChain stores settings in `config/app_config.toml`. Relevant settings include:
+LearnChain stores settings in a user-global `app_config.toml` file. On macOS this defaults to `~/Library/Application Support/learnchain/app_config.toml`; on Linux it uses the XDG config directory; on Windows it uses `APPDATA`. The app still reads a legacy local `config/app_config.toml` when present so older repo-local setups can migrate forward.
+
+Relevant settings include:
 
 - session source selection
 - default event sampling and quiz sizing
