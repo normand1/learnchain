@@ -11,10 +11,8 @@ use color_eyre::eyre::{Result, eyre};
 use regex::Regex;
 use reqwest::{Client, Url, redirect::Policy};
 
-use super::backend::LlmRequestOptions;
 use crate::{
     AiTaskKind, AiTaskMessage, Project,
-    config::AiProvider,
     config::DeepDiveSectionsConfig,
     llm::{
         DeepDiveArtifactMetadata, DeepDiveGenerationResult, DeepDiveResearchPlan,
@@ -110,7 +108,7 @@ pub(crate) async fn generate_deep_dive_with_progress(
 ) -> Result<DeepDiveGenerationResult> {
     let sender = progress_sender.into();
     let bundle = build_session_research_bundle(session_source, &session);
-    let request_options = LlmRequestOptions::session_deep_dive();
+    let request_options = backend.session_deep_dive_options();
     let file_references = build_session_file_references(&bundle.session);
 
     if let Some(sender) = sender {
@@ -130,38 +128,27 @@ pub(crate) async fn generate_deep_dive_with_progress(
         send_progress(sender, "Planning deep-dive research...", 35);
     }
 
-    let (mut plan, plan_usage) = if should_skip_llm_research_plan(backend) {
-        if let Some(sender) = sender {
-            send_progress(
-                sender,
-                "Using a compact local research plan for Codex CLI...",
-                45,
-            );
-        }
-        (build_fallback_research_plan(&bundle), None)
-    } else {
-        match backend
-            .extract_typed_with_options::<DeepDiveResearchPlan>(
-                deep_dive_plan_preamble(),
-                &plan_prompt,
-                "deep-dive research plan",
-                request_options,
-            )
-            .await
-        {
-            Ok(result) => result,
-            Err(err) if err.to_string().contains("timed out") => {
-                if let Some(sender) = sender {
-                    send_progress(
-                        sender,
-                        "Research planning timed out, using a compact local fallback...",
-                        45,
-                    );
-                }
-                (build_fallback_research_plan(&bundle), None)
+    let (mut plan, plan_usage) = match backend
+        .extract_typed_with_options::<DeepDiveResearchPlan>(
+            deep_dive_plan_preamble(),
+            &plan_prompt,
+            "deep-dive research plan",
+            request_options,
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(err) if err.to_string().contains("timed out") => {
+            if let Some(sender) = sender {
+                send_progress(
+                    sender,
+                    "Research planning timed out, using a compact local fallback...",
+                    45,
+                );
             }
-            Err(err) => return Err(err),
+            (build_fallback_research_plan(&bundle), None)
         }
+        Err(err) => return Err(err),
     };
 
     plan.selected_urls = sanitize_selected_urls(&bundle.external_urls, &plan.selected_urls);
@@ -252,10 +239,6 @@ pub(crate) async fn generate_deep_dive_with_progress(
         usage,
         reviewed_source_failures: fetch_failures,
     })
-}
-
-fn should_skip_llm_research_plan(backend: &LlmBackend) -> bool {
-    backend.provider() == AiProvider::CodexCli
 }
 
 pub(crate) fn select_balanced_events(
@@ -2313,7 +2296,6 @@ fn split_sentences(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AiProvider, ResolvedLlmConfig};
     use crate::llm::DeepDiveArtifactMetadata;
     use crate::llm::types::{KnowledgeResponse, QuizItem, QuizOption};
     use crate::session_analytics::{
@@ -2677,38 +2659,6 @@ mod tests {
         assert_eq!(plan.inferred_goal, "Ship the session deep-dive flow");
         assert!(!plan.candidate_accomplishments.is_empty());
         assert!(plan.selected_urls.len() <= MAX_REVIEW_URLS);
-    }
-
-    #[test]
-    fn codex_cli_skips_llm_research_plan() {
-        let backend = LlmBackend::from_config(
-            ResolvedLlmConfig {
-                provider: AiProvider::CodexCli,
-                model_name: "codex-exec".to_string(),
-                model_label: "CLI default".to_string(),
-                api_key: String::new(),
-            },
-            "output",
-        )
-        .unwrap();
-
-        assert!(should_skip_llm_research_plan(&backend));
-    }
-
-    #[test]
-    fn claude_code_cli_does_not_skip_llm_research_plan() {
-        let backend = LlmBackend::from_config(
-            ResolvedLlmConfig {
-                provider: AiProvider::ClaudeCodeCli,
-                model_name: "claude-code-print".to_string(),
-                model_label: "CLI default".to_string(),
-                api_key: String::new(),
-            },
-            "output",
-        )
-        .unwrap();
-
-        assert!(!should_skip_llm_research_plan(&backend));
     }
 
     #[test]

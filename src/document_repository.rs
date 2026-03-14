@@ -684,7 +684,7 @@ fn normalize_learnchain_site_url(site_url: &str) -> String {
         let host = url.host_str().unwrap_or_default();
         if matches!(host, "learnchain.co" | "www.learnchain.co") {
             let _ = url.set_scheme("https");
-            let _ = url.set_host(Some("learnchain.co"));
+            let _ = url.set_host(Some("www.learnchain.co"));
             return url.to_string().trim_end_matches('/').to_string();
         }
     }
@@ -1762,6 +1762,18 @@ mod tests {
             "learnchain-quiz-rust-borrowing.md"
         );
         assert_eq!(learnchain_filename(""), "learnchain-document.md");
+    }
+
+    #[test]
+    fn normalize_learnchain_site_url_uses_www_canonical_host() {
+        assert_eq!(
+            normalize_learnchain_site_url("https://learnchain.co"),
+            "https://www.learnchain.co"
+        );
+        assert_eq!(
+            normalize_learnchain_site_url("https://www.learnchain.co/"),
+            "https://www.learnchain.co"
+        );
     }
 
     #[test]

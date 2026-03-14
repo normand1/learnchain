@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.6] - 2026-03-14
+
+### Changed
+
+- Added a configurable deep-dive request timeout to the AI settings and carried that timeout through the LLM backend.
+- Updated the configuration UI and saved-config feedback so the active deep-dive timeout is visible while tuning providers.
+
+### Fixed
+
+- Canonicalized LearnChain uploads to `https://www.learnchain.co` so document exports do not fail on the production `307` redirect from the apex host.
+
 ## [0.4.2] - 2026-03-12
 
 ### Changed

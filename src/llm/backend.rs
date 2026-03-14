@@ -28,7 +28,6 @@ use super::types::{LearningGenerationResult, LlmUsage, StructuredLearningRespons
 
 const EXTRACTOR_RETRIES: u64 = 1;
 const LLM_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
-const DEEP_DIVE_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CodexReasoningEffort {
@@ -50,9 +49,9 @@ pub(crate) struct LlmRequestOptions {
 }
 
 impl LlmRequestOptions {
-    pub(crate) fn session_deep_dive() -> Self {
+    pub(crate) fn session_deep_dive(timeout: Duration) -> Self {
         Self {
-            timeout: DEEP_DIVE_REQUEST_TIMEOUT,
+            timeout,
             codex_reasoning_effort: Some(CodexReasoningEffort::Low),
         }
     }
@@ -87,6 +86,7 @@ pub struct LlmBackend {
     provider: AiProvider,
     model_name: String,
     output_root: PathBuf,
+    deep_dive_request_timeout: Duration,
 }
 
 impl LlmBackend {
@@ -125,11 +125,12 @@ impl LlmBackend {
             provider: resolved.provider,
             model_name: resolved.model_name,
             output_root: output_root.into(),
+            deep_dive_request_timeout: Duration::from_secs(resolved.deep_dive_timeout_secs),
         })
     }
 
-    pub(crate) fn provider(&self) -> AiProvider {
-        self.provider
+    pub(crate) fn session_deep_dive_options(&self) -> LlmRequestOptions {
+        LlmRequestOptions::session_deep_dive(self.deep_dive_request_timeout)
     }
 
     pub async fn generate_learning_response_with_progress(
@@ -904,6 +905,7 @@ mod tests {
             model_name: "gpt-5".to_string(),
             model_label: "gpt-5".to_string(),
             api_key: String::new(),
+            deep_dive_timeout_secs: 240,
         };
 
         let result = LlmBackend::from_config(resolved, "output");
@@ -923,6 +925,7 @@ mod tests {
             model_name: "claude-sonnet-4-20250514".to_string(),
             model_label: "Claude Sonnet 4".to_string(),
             api_key: String::new(),
+            deep_dive_timeout_secs: 240,
         };
 
         let result = LlmBackend::from_config(resolved, "output");
@@ -942,6 +945,7 @@ mod tests {
             model_name: "openrouter/model".to_string(),
             model_label: "openrouter/model".to_string(),
             api_key: String::new(),
+            deep_dive_timeout_secs: 240,
         };
 
         let result = LlmBackend::from_config(resolved, "output");
@@ -961,6 +965,7 @@ mod tests {
             model_name: "codex-exec".to_string(),
             model_label: "CLI default".to_string(),
             api_key: String::new(),
+            deep_dive_timeout_secs: 240,
         };
 
         let result = LlmBackend::from_config(resolved, "output");
@@ -974,6 +979,7 @@ mod tests {
             model_name: "claude-code-print".to_string(),
             model_label: "CLI default".to_string(),
             api_key: String::new(),
+            deep_dive_timeout_secs: 240,
         };
 
         let result = LlmBackend::from_config(resolved, "output");
@@ -1002,7 +1008,10 @@ mod tests {
         let mut command = Command::new("codex");
         command.arg("exec");
 
-        apply_codex_cli_overrides(&mut command, LlmRequestOptions::session_deep_dive());
+        apply_codex_cli_overrides(
+            &mut command,
+            LlmRequestOptions::session_deep_dive(Duration::from_secs(240)),
+        );
 
         let program = command.as_std().get_program().to_string_lossy().to_string();
         let args = command
@@ -1015,6 +1024,22 @@ mod tests {
         assert!(args.contains(&"exec".to_string()));
         assert!(args.contains(&"-c".to_string()));
         assert!(args.contains(&"model_reasoning_effort=\"low\"".to_string()));
+    }
+
+    #[test]
+    fn resolved_llm_factory_uses_configured_deep_dive_timeout() {
+        let resolved = ResolvedLlmConfig {
+            provider: AiProvider::CodexCli,
+            model_name: "codex-exec".to_string(),
+            model_label: "CLI default".to_string(),
+            api_key: String::new(),
+            deep_dive_timeout_secs: 480,
+        };
+
+        let backend = LlmBackend::from_config(resolved, "output").unwrap();
+        let options = backend.session_deep_dive_options();
+
+        assert_eq!(options.timeout, Duration::from_secs(480));
     }
 
     #[test]

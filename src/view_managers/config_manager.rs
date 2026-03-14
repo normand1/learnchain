@@ -322,6 +322,7 @@ impl<'a> ConfigManager<'a> {
         let target_max = self.app.config_form.max_events;
         let target_min = self.app.config_form.min_quiz_questions;
         let target_sampling = self.app.config_form.sampling_percentage;
+        let target_deep_dive_timeout_secs = self.app.config_form.deep_dive_timeout_secs;
         let target_source = self.app.config_form.session_source;
         let target_deep_dive_sections = self.app.config_form.deep_dive_sections.clone();
         let target_write = self.app.config_form.write_output_artifacts;
@@ -408,6 +409,7 @@ impl<'a> ConfigManager<'a> {
             config.default_max_events = target_max;
             config.min_quiz_questions = target_min;
             config.sampling_percentage = target_sampling;
+            config.deep_dive_timeout_secs = target_deep_dive_timeout_secs;
             config.session_source = target_source;
             config.deep_dive_sections = target_deep_dive_sections.clone();
             config.write_output_artifacts = target_write;
@@ -457,19 +459,21 @@ impl<'a> ConfigManager<'a> {
                     config::AiProvider::CodexCli | config::AiProvider::ClaudeCodeCli
                 ) {
                     format!(
-                        "Saved • Provider: {} • Model: CLI default • Uses installed CLI configuration",
-                        resolved_llm.provider.label()
+                        "Saved • Provider: {} • Model: CLI default • Deep-dive timeout: {}s • Uses installed CLI configuration",
+                        resolved_llm.provider.label(),
+                        resolved_llm.deep_dive_timeout_secs
                     )
                 } else {
                     format!(
-                        "Saved • Provider: {} • Model: {} • Key: {}",
+                        "Saved • Provider: {} • Model: {} • Key: {} • Deep-dive timeout: {}s",
                         resolved_llm.provider.label(),
                         resolved_llm.model_label,
                         if resolved_llm.api_key.trim().is_empty() {
                             "not set"
                         } else {
                             "set"
-                        }
+                        },
+                        resolved_llm.deep_dive_timeout_secs
                     )
                 };
                 self.app.config_form.set_status(status);

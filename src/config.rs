@@ -54,6 +54,8 @@ pub struct AppConfig {
     // Sampling percentage for quiz generation (1-100)
     #[serde(default = "default_sampling_percentage")]
     pub sampling_percentage: u8,
+    #[serde(default = "default_deep_dive_timeout_secs_value")]
+    pub deep_dive_timeout_secs: u64,
     #[serde(default)]
     pub deep_dive_sections: DeepDiveSectionsConfig,
 }
@@ -111,6 +113,7 @@ pub struct ResolvedLlmConfig {
     pub model_name: String,
     pub model_label: String,
     pub api_key: String,
+    pub deep_dive_timeout_secs: u64,
 }
 
 impl AppConfig {
@@ -121,6 +124,7 @@ impl AppConfig {
         if self.min_quiz_questions == 0 {
             self.min_quiz_questions = DEFAULT_MIN_QUIZ_QUESTIONS;
         }
+        self.deep_dive_timeout_secs = normalize_deep_dive_timeout_secs(self.deep_dive_timeout_secs);
         self.normalize_document_repository();
         self.learnchain_site_url = normalize_learnchain_site_url(&self.learnchain_site_url);
         self.learnchain_email = self.learnchain_email.trim().to_string();
@@ -157,12 +161,14 @@ impl AppConfig {
                 model_name: self.openai_model.as_model_name().to_string(),
                 model_label: self.openai_model.label().to_string(),
                 api_key: self.openai_api_key.clone(),
+                deep_dive_timeout_secs: self.deep_dive_timeout_secs,
             },
             AiProvider::Anthropic => ResolvedLlmConfig {
                 provider: self.ai_provider,
                 model_name: self.anthropic_model.as_model_name().to_string(),
                 model_label: self.anthropic_model.label().to_string(),
                 api_key: self.anthropic_api_key.clone(),
+                deep_dive_timeout_secs: self.deep_dive_timeout_secs,
             },
             AiProvider::OpenRouter => ResolvedLlmConfig {
                 provider: self.ai_provider,
@@ -173,18 +179,21 @@ impl AppConfig {
                     self.openrouter_model.clone()
                 },
                 api_key: self.openrouter_api_key.clone(),
+                deep_dive_timeout_secs: self.deep_dive_timeout_secs,
             },
             AiProvider::CodexCli => ResolvedLlmConfig {
                 provider: self.ai_provider,
                 model_name: "codex-exec".to_string(),
                 model_label: "CLI default".to_string(),
                 api_key: String::new(),
+                deep_dive_timeout_secs: self.deep_dive_timeout_secs,
             },
             AiProvider::ClaudeCodeCli => ResolvedLlmConfig {
                 provider: self.ai_provider,
                 model_name: "claude-code-print".to_string(),
                 model_label: "CLI default".to_string(),
                 api_key: String::new(),
+                deep_dive_timeout_secs: self.deep_dive_timeout_secs,
             },
         }
     }
@@ -213,6 +222,7 @@ impl Default for AppConfig {
             openrouter_model: String::new(),
             openrouter_api_key: String::new(),
             sampling_percentage: default_sampling_percentage(),
+            deep_dive_timeout_secs: default_deep_dive_timeout_secs_value(),
             deep_dive_sections: DeepDiveSectionsConfig::default(),
         }
     }
@@ -251,7 +261,11 @@ impl DocumentRepositoryKind {
 
 const DEFAULT_MAX_EVENTS: usize = 15;
 const DEFAULT_MIN_QUIZ_QUESTIONS: usize = 5;
-pub(crate) const LEARNCHAIN_DEFAULT_SITE_URL: &str = "https://learnchain.co";
+pub(crate) const DEFAULT_DEEP_DIVE_TIMEOUT_SECS: u64 = 240;
+pub(crate) const MIN_DEEP_DIVE_TIMEOUT_SECS: u64 = 30;
+pub(crate) const MAX_DEEP_DIVE_TIMEOUT_SECS: u64 = 1800;
+pub(crate) const DEEP_DIVE_TIMEOUT_STEP_SECS: u64 = 15;
+pub(crate) const LEARNCHAIN_DEFAULT_SITE_URL: &str = "https://www.learnchain.co";
 const fn default_session_source_kind() -> SessionSourceKind {
     SessionSourceKind::Codex
 }
@@ -263,6 +277,9 @@ const fn default_openai_model_kind() -> OpenAiModelKind {
 }
 const fn default_sampling_percentage() -> u8 {
     10
+}
+const fn default_deep_dive_timeout_secs_value() -> u64 {
+    DEFAULT_DEEP_DIVE_TIMEOUT_SECS
 }
 fn default_learnchain_site_url() -> String {
     LEARNCHAIN_DEFAULT_SITE_URL.to_string()
@@ -486,6 +503,14 @@ const fn default_min_quiz_questions_value() -> usize {
     DEFAULT_MIN_QUIZ_QUESTIONS
 }
 
+fn normalize_deep_dive_timeout_secs(value: u64) -> u64 {
+    if value == 0 {
+        DEFAULT_DEEP_DIVE_TIMEOUT_SECS
+    } else {
+        value.clamp(MIN_DEEP_DIVE_TIMEOUT_SECS, MAX_DEEP_DIVE_TIMEOUT_SECS)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionSourceKind {
@@ -600,6 +625,7 @@ pub(crate) enum ConfigField {
     LearnChainEmail,
     LearnChainAuthCode,
     AiProvider,
+    DeepDiveTimeout,
     OpenAiModel,
     OpenAiKey,
     AnthropicModel,
@@ -660,6 +686,7 @@ pub struct ConfigForm {
     pub(crate) max_events: usize,
     pub(crate) min_quiz_questions: usize,
     pub(crate) sampling_percentage: u8,
+    pub(crate) deep_dive_timeout_secs: u64,
     pub(crate) session_source: SessionSourceKind,
     pub(crate) deep_dive_sections: DeepDiveSectionsConfig,
     pub(crate) write_output_artifacts: bool,
@@ -714,6 +741,7 @@ impl ConfigForm {
             max_events: config.default_max_events,
             min_quiz_questions: config.min_quiz_questions,
             sampling_percentage: config.sampling_percentage,
+            deep_dive_timeout_secs: config.deep_dive_timeout_secs,
             session_source: config.session_source,
             deep_dive_sections: config.deep_dive_sections,
             write_output_artifacts: config.write_output_artifacts,
@@ -765,12 +793,14 @@ impl ConfigForm {
                 model_name: self.openai_model.as_model_name().to_string(),
                 model_label: self.openai_model.label().to_string(),
                 api_key: self.openai_api_key.clone(),
+                deep_dive_timeout_secs: self.deep_dive_timeout_secs,
             },
             AiProvider::Anthropic => ResolvedLlmConfig {
                 provider: self.ai_provider,
                 model_name: self.anthropic_model.as_model_name().to_string(),
                 model_label: self.anthropic_model.label().to_string(),
                 api_key: self.anthropic_api_key.clone(),
+                deep_dive_timeout_secs: self.deep_dive_timeout_secs,
             },
             AiProvider::OpenRouter => ResolvedLlmConfig {
                 provider: self.ai_provider,
@@ -781,18 +811,21 @@ impl ConfigForm {
                     self.openrouter_model.clone()
                 },
                 api_key: self.openrouter_api_key.clone(),
+                deep_dive_timeout_secs: self.deep_dive_timeout_secs,
             },
             AiProvider::CodexCli => ResolvedLlmConfig {
                 provider: self.ai_provider,
                 model_name: "codex-exec".to_string(),
                 model_label: "CLI default".to_string(),
                 api_key: String::new(),
+                deep_dive_timeout_secs: self.deep_dive_timeout_secs,
             },
             AiProvider::ClaudeCodeCli => ResolvedLlmConfig {
                 provider: self.ai_provider,
                 model_name: "claude-code-print".to_string(),
                 model_label: "CLI default".to_string(),
                 api_key: String::new(),
+                deep_dive_timeout_secs: self.deep_dive_timeout_secs,
             },
         }
     }
@@ -831,6 +864,7 @@ impl ConfigForm {
         }
 
         fields.push(ConfigField::AiProvider);
+        fields.push(ConfigField::DeepDiveTimeout);
 
         match self.ai_provider {
             AiProvider::OpenAI => {
@@ -872,6 +906,7 @@ impl ConfigForm {
             | ConfigField::LearnChainEmail
             | ConfigField::LearnChainAuthCode => ConfigSection::Export,
             ConfigField::AiProvider
+            | ConfigField::DeepDiveTimeout
             | ConfigField::OpenAiModel
             | ConfigField::OpenAiKey
             | ConfigField::AnthropicModel
@@ -1087,6 +1122,20 @@ impl ConfigForm {
                     self.field = ConfigField::AiProvider;
                 }
             }
+            ConfigField::DeepDiveTimeout => {
+                let current = self.deep_dive_timeout_secs as i64;
+                let step = DEEP_DIVE_TIMEOUT_STEP_SECS as i64 * delta as i64;
+                let updated = (current + step).clamp(
+                    MIN_DEEP_DIVE_TIMEOUT_SECS as i64,
+                    MAX_DEEP_DIVE_TIMEOUT_SECS as i64,
+                ) as u64;
+
+                if updated != self.deep_dive_timeout_secs {
+                    self.deep_dive_timeout_secs = updated;
+                    self.dirty = true;
+                    self.status = None;
+                }
+            }
             ConfigField::OpenAiModel => {
                 let updated = if delta > 0 {
                     self.openai_model.next()
@@ -1153,6 +1202,7 @@ impl ConfigForm {
         self.max_events = config.default_max_events;
         self.min_quiz_questions = config.min_quiz_questions;
         self.sampling_percentage = config.sampling_percentage;
+        self.deep_dive_timeout_secs = config.deep_dive_timeout_secs;
         self.session_source = config.session_source;
         self.deep_dive_sections = config.deep_dive_sections;
         self.write_output_artifacts = config.write_output_artifacts;
@@ -1757,7 +1807,7 @@ pub(crate) fn claude_code_cli_config_help_message() -> &'static str {
 pub(crate) fn validate_learnchain_site_url(value: &str) -> std::result::Result<(), String> {
     let normalized = normalize_learnchain_site_url(value);
     let url = reqwest::Url::parse(&normalized).map_err(|_| {
-        "Enter a valid LearnChain URL like https://learnchain.co or http://localhost:3000."
+        "Enter a valid LearnChain URL like https://www.learnchain.co or http://localhost:3000."
             .to_string()
     })?;
 
@@ -1808,7 +1858,7 @@ fn normalize_learnchain_site_url(value: &str) -> String {
         let host = url.host_str().unwrap_or_default();
         if matches!(host, "learnchain.co" | "www.learnchain.co") {
             let _ = url.set_scheme("https");
-            let _ = url.set_host(Some("learnchain.co"));
+            let _ = url.set_host(Some("www.learnchain.co"));
             return url.to_string().trim_end_matches('/').to_string();
         }
     }
@@ -1909,6 +1959,10 @@ mod tests {
         assert_eq!(resolved.model_name, "gpt-5");
         assert_eq!(resolved.model_label, "gpt-5");
         assert_eq!(resolved.api_key, "sk-openai");
+        assert_eq!(
+            resolved.deep_dive_timeout_secs,
+            DEFAULT_DEEP_DIVE_TIMEOUT_SECS
+        );
         assert!(
             AiProvider::OpenAI
                 .setup_help()
@@ -1930,6 +1984,10 @@ mod tests {
         assert_eq!(resolved.model_name, "claude-opus-4-20250514");
         assert_eq!(resolved.model_label, "Claude Opus 4");
         assert_eq!(resolved.api_key, "sk-anthropic");
+        assert_eq!(
+            resolved.deep_dive_timeout_secs,
+            DEFAULT_DEEP_DIVE_TIMEOUT_SECS
+        );
         assert!(
             AiProvider::Anthropic
                 .setup_help()
@@ -1949,6 +2007,10 @@ mod tests {
         assert_eq!(resolved.model_name, "openrouter/model");
         assert_eq!(resolved.model_label, "openrouter/model");
         assert_eq!(resolved.api_key, "sk-openrouter");
+        assert_eq!(
+            resolved.deep_dive_timeout_secs,
+            DEFAULT_DEEP_DIVE_TIMEOUT_SECS
+        );
         assert!(
             AiProvider::OpenRouter
                 .setup_help()
@@ -1968,6 +2030,10 @@ mod tests {
         assert_eq!(resolved.model_name, "codex-exec");
         assert_eq!(resolved.model_label, "CLI default");
         assert!(resolved.api_key.is_empty());
+        assert_eq!(
+            resolved.deep_dive_timeout_secs,
+            DEFAULT_DEEP_DIVE_TIMEOUT_SECS
+        );
         assert!(AiProvider::CodexCli.setup_help().contains("Codex CLI"));
     }
 
@@ -1983,6 +2049,10 @@ mod tests {
         assert_eq!(resolved.model_name, "claude-code-print");
         assert_eq!(resolved.model_label, "CLI default");
         assert!(resolved.api_key.is_empty());
+        assert_eq!(
+            resolved.deep_dive_timeout_secs,
+            DEFAULT_DEEP_DIVE_TIMEOUT_SECS
+        );
         assert!(
             AiProvider::ClaudeCodeCli
                 .setup_help()
@@ -2000,6 +2070,10 @@ mod tests {
         assert!(config.learnchain_access_token.is_empty());
         assert!(config.learnchain_refresh_token.is_empty());
         assert!(config.learnchain_password.is_empty());
+        assert_eq!(
+            config.deep_dive_timeout_secs,
+            DEFAULT_DEEP_DIVE_TIMEOUT_SECS
+        );
     }
 
     #[test]
@@ -2062,6 +2136,7 @@ mod tests {
                 ConfigField::OutputArtifacts,
                 ConfigField::DocumentRepository,
                 ConfigField::AiProvider,
+                ConfigField::DeepDiveTimeout,
                 ConfigField::OpenAiModel,
                 ConfigField::OpenAiKey,
             ]
@@ -2094,6 +2169,7 @@ mod tests {
                 ConfigField::DocumentRepositoryTarget,
                 ConfigField::NotionApiToken,
                 ConfigField::AiProvider,
+                ConfigField::DeepDiveTimeout,
                 ConfigField::OpenAiModel,
                 ConfigField::OpenAiKey,
             ]
@@ -2123,6 +2199,7 @@ mod tests {
                 ConfigField::OutputArtifacts,
                 ConfigField::DocumentRepository,
                 ConfigField::AiProvider,
+                ConfigField::DeepDiveTimeout,
             ]
         );
     }
@@ -2150,6 +2227,7 @@ mod tests {
                 ConfigField::OutputArtifacts,
                 ConfigField::DocumentRepository,
                 ConfigField::AiProvider,
+                ConfigField::DeepDiveTimeout,
             ]
         );
     }
@@ -2180,6 +2258,7 @@ mod tests {
                 ConfigField::LearnChainEmail,
                 ConfigField::LearnChainAuthCode,
                 ConfigField::AiProvider,
+                ConfigField::DeepDiveTimeout,
                 ConfigField::OpenAiModel,
                 ConfigField::OpenAiKey,
             ]
@@ -2229,6 +2308,7 @@ mod tests {
             form.visible_fields_in_section(ConfigSection::Ai),
             vec![
                 ConfigField::AiProvider,
+                ConfigField::DeepDiveTimeout,
                 ConfigField::OpenRouterModel,
                 ConfigField::OpenRouterKey,
             ]
@@ -2273,6 +2353,25 @@ mod tests {
 
         assert!(!form.deep_dive_sections.reviewed_external_sources);
         assert!(form.dirty);
+    }
+
+    #[test]
+    fn deep_dive_timeout_adjustment_uses_bounded_steps() {
+        let mut form = ConfigForm::from_config(AppConfig::default());
+        form.selected_section = ConfigSection::Ai;
+        form.field = ConfigField::DeepDiveTimeout;
+
+        form.adjust_current(1);
+        assert_eq!(
+            form.deep_dive_timeout_secs,
+            DEFAULT_DEEP_DIVE_TIMEOUT_SECS + DEEP_DIVE_TIMEOUT_STEP_SECS
+        );
+
+        form.adjust_current(-100);
+        assert_eq!(form.deep_dive_timeout_secs, MIN_DEEP_DIVE_TIMEOUT_SECS);
+
+        form.adjust_current(1000);
+        assert_eq!(form.deep_dive_timeout_secs, MAX_DEEP_DIVE_TIMEOUT_SECS);
     }
 
     #[test]
@@ -2432,11 +2531,11 @@ mod tests {
     fn learnchain_signup_url_canonicalizes_public_host_to_https() {
         assert_eq!(
             learnchain_signup_url("https://learnchain.co/"),
-            "https://learnchain.co/login"
+            "https://www.learnchain.co/login"
         );
         assert_eq!(
             learnchain_dashboard_url("http://learnchain.co"),
-            "https://learnchain.co/dashboard"
+            "https://www.learnchain.co/dashboard"
         );
     }
 
@@ -2453,7 +2552,7 @@ mod tests {
         assert_eq!(
             form.status.as_deref(),
             Some(
-                "Reset LearnChain site URL to the default (https://learnchain.co). Dashboard: https://learnchain.co/dashboard"
+                "Reset LearnChain site URL to the default (https://www.learnchain.co). Dashboard: https://www.learnchain.co/dashboard"
             )
         );
     }
@@ -2482,6 +2581,27 @@ sampling_percentage = 10
         config.normalize();
         assert_eq!(config.document_repository, DocumentRepositoryKind::Notion);
         assert_eq!(config.document_repository_target, "database/abc");
+    }
+
+    #[test]
+    fn app_config_normalize_defaults_or_clamps_deep_dive_timeout() {
+        let mut config = AppConfig {
+            deep_dive_timeout_secs: 0,
+            ..AppConfig::default()
+        };
+        config.normalize();
+        assert_eq!(
+            config.deep_dive_timeout_secs,
+            DEFAULT_DEEP_DIVE_TIMEOUT_SECS
+        );
+
+        config.deep_dive_timeout_secs = 5;
+        config.normalize();
+        assert_eq!(config.deep_dive_timeout_secs, MIN_DEEP_DIVE_TIMEOUT_SECS);
+
+        config.deep_dive_timeout_secs = MAX_DEEP_DIVE_TIMEOUT_SECS + 60;
+        config.normalize();
+        assert_eq!(config.deep_dive_timeout_secs, MAX_DEEP_DIVE_TIMEOUT_SECS);
     }
 
     #[test]
@@ -2538,6 +2658,10 @@ sampling_percentage = 10
         assert!(config.learnchain_access_token.is_empty());
         assert!(config.learnchain_refresh_token.is_empty());
         assert!(config.learnchain_password.is_empty());
+        assert_eq!(
+            config.deep_dive_timeout_secs,
+            DEFAULT_DEEP_DIVE_TIMEOUT_SECS
+        );
         assert_eq!(
             config.deep_dive_sections.enabled_count(),
             DeepDiveSectionsConfig::total_count()

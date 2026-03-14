@@ -2628,7 +2628,12 @@ impl<'a> UiRenderer<'a> {
                         "CLI default".to_string()
                     }
                 };
-                format!("{} • {}", app.config_form.ai_provider.label(), model)
+                format!(
+                    "{} • {} • timeout {}",
+                    app.config_form.ai_provider.label(),
+                    model,
+                    Self::format_config_timeout(app.config_form.deep_dive_timeout_secs)
+                )
             }
         }
     }
@@ -2665,6 +2670,7 @@ impl<'a> UiRenderer<'a> {
             config::ConfigField::LearnChainEmail => "Linked LearnChain account".to_string(),
             config::ConfigField::LearnChainAuthCode => "LearnChain login code".to_string(),
             config::ConfigField::AiProvider => "AI provider".to_string(),
+            config::ConfigField::DeepDiveTimeout => "Deep-dive timeout".to_string(),
             config::ConfigField::OpenAiModel => "OpenAI model".to_string(),
             config::ConfigField::OpenAiKey => "OpenAI API key".to_string(),
             config::ConfigField::AnthropicModel => "Anthropic model".to_string(),
@@ -2778,6 +2784,9 @@ impl<'a> UiRenderer<'a> {
                 }
             }
             config::ConfigField::AiProvider => app.config_form.ai_provider.label().to_string(),
+            config::ConfigField::DeepDiveTimeout => {
+                Self::format_config_timeout(app.config_form.deep_dive_timeout_secs)
+            }
             config::ConfigField::OpenAiModel => app.config_form.openai_model.label().to_string(),
             config::ConfigField::OpenAiKey => {
                 if app.config_form.is_editing_openai_key() {
@@ -2889,6 +2898,10 @@ impl<'a> UiRenderer<'a> {
             config::ConfigField::AiProvider => {
                 "Chooses the backend used for quizzes and deep-dive generation.".to_string()
             }
+            config::ConfigField::DeepDiveTimeout => {
+                "Sets how long LearnChain waits for each model-backed deep-dive request."
+                    .to_string()
+            }
             config::ConfigField::OpenAiModel => {
                 "Picks the OpenAI model used after choosing OpenAI.".to_string()
             }
@@ -2974,6 +2987,9 @@ impl<'a> UiRenderer<'a> {
             config::ConfigField::AiProvider => {
                 "Changing the provider changes the visible model and credential fields and decides which backend serves every generation request.".to_string()
             }
+            config::ConfigField::DeepDiveTimeout => {
+                "This applies to deep-dive research planning and final composition calls before LearnChain gives up or falls back to the compact local plan.".to_string()
+            }
             config::ConfigField::OpenAiModel => {
                 "This model will be used for both quiz generation and deep dives whenever OpenAI is active.".to_string()
             }
@@ -3022,6 +3038,10 @@ impl<'a> UiRenderer<'a> {
                 config::ConfigField::LearnChainEmail => {
                     "Press Enter to clear the stored LearnChain account link.".to_string()
                 }
+                config::ConfigField::DeepDiveTimeout => format!(
+                    "Use Left/Right (or h/l) to adjust this value in {} second steps, then press s to save.",
+                    config::DEEP_DIVE_TIMEOUT_STEP_SECS
+                ),
                 config::ConfigField::DeepDiveSessionMetadata
                 | config::ConfigField::DeepDiveGoal
                 | config::ConfigField::DeepDiveAccomplishments
@@ -3069,6 +3089,12 @@ impl<'a> UiRenderer<'a> {
                 }
                 _ => None,
             },
+            config::ConfigField::DeepDiveTimeout => Some(format!(
+                "Allowed range: {}s to {}s. Default: {}s.",
+                config::MIN_DEEP_DIVE_TIMEOUT_SECS,
+                config::MAX_DEEP_DIVE_TIMEOUT_SECS,
+                config::DEFAULT_DEEP_DIVE_TIMEOUT_SECS
+            )),
             config::ConfigField::DeepDiveSessionMetadata
             | config::ConfigField::DeepDiveGoal
             | config::ConfigField::DeepDiveAccomplishments
@@ -3223,6 +3249,16 @@ impl<'a> UiRenderer<'a> {
             } else {
                 format!("{}m {}s", minutes, seconds)
             }
+        }
+    }
+
+    fn format_config_timeout(secs: u64) -> String {
+        if secs < 60 {
+            format!("{}s", secs)
+        } else if secs % 60 == 0 {
+            format!("{}m ({}s)", secs / 60, secs)
+        } else {
+            format!("{}m {}s", secs / 60, secs % 60)
         }
     }
 }
