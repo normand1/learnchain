@@ -26,4 +26,4 @@ html2text = "0.16"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "charset", "http2", "multipart"] }
 
 [dev-dependencies]
-tempfile = "3.10"
+tempfile = "3.27"
