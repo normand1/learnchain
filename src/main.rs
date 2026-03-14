@@ -169,7 +169,7 @@ pub(crate) enum AiTaskKind {
 #[derive(Debug)]
 pub(crate) enum AiTaskMessage {
     LearningSuccess(LearningGenerationResult),
-    DeepDiveSuccess(DeepDiveGenerationResult),
+    DeepDiveSuccess(Box<DeepDiveGenerationResult>),
     Error(AiTaskKind, String),
     Progress(AiTaskKind, String, u8), // (kind, message, percentage)
 }
@@ -941,6 +941,12 @@ impl Project {
 
 fn is_llm_setup_error(message: &str) -> bool {
     message.contains("not configured")
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl App {

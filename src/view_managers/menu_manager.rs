@@ -341,6 +341,9 @@ mod tests {
         MenuManager::new(&mut app).handle_menu_key(KeyEvent::from(KeyCode::Char('2')));
 
         assert_eq!(app.view, AppView::SessionPicker);
-        assert_eq!(app.session_selection_target, Some(SessionSelectionTarget::DeepDive));
+        assert_eq!(
+            app.session_selection_target,
+            Some(SessionSelectionTarget::DeepDive)
+        );
     }
 }

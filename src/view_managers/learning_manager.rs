@@ -196,10 +196,7 @@ impl<'a> LearningManager<'a> {
             .map(|question| question.options.len())
             .unwrap_or(0);
 
-        if option_len == 0 {
-            self.app.learning_option_index = 0;
-            Self::reset_feedback_state(self.app);
-        } else if self.app.learning_option_index >= option_len {
+        if option_len == 0 || self.app.learning_option_index >= option_len {
             self.app.learning_option_index = 0;
             Self::reset_feedback_state(self.app);
         }
@@ -244,20 +241,20 @@ impl<'a> LearningManager<'a> {
             return;
         }
 
-        if let Some(quiz_len) = self.active_group_quiz_len() {
-            if self.app.learning_quiz_index + 1 < quiz_len {
-                self.app.learning_quiz_index += 1;
-                self.app.learning_option_index = 0;
-                self.reset_feedback();
-                log_debug(&format!(
-                    "App: moved to question {} of {} in group {}",
-                    self.app.learning_quiz_index + 1,
-                    quiz_len,
-                    self.app.learning_group_index + 1
-                ));
-                self.ensure_indices();
-                return;
-            }
+        if let Some(quiz_len) = self.active_group_quiz_len()
+            && self.app.learning_quiz_index + 1 < quiz_len
+        {
+            self.app.learning_quiz_index += 1;
+            self.app.learning_option_index = 0;
+            self.reset_feedback();
+            log_debug(&format!(
+                "App: moved to question {} of {} in group {}",
+                self.app.learning_quiz_index + 1,
+                quiz_len,
+                self.app.learning_group_index + 1
+            ));
+            self.ensure_indices();
+            return;
         }
 
         if self.move_to_next_group_with_quiz() {
@@ -288,20 +285,20 @@ impl<'a> LearningManager<'a> {
     }
 
     pub(crate) fn previous_question(&mut self) {
-        if let Some(quiz_len) = self.active_group_quiz_len() {
-            if self.app.learning_quiz_index > 0 {
-                self.app.learning_quiz_index -= 1;
-                self.app.learning_option_index = 0;
-                self.reset_feedback();
-                log_debug(&format!(
-                    "App: moved to question {} of {} in group {}",
-                    self.app.learning_quiz_index + 1,
-                    quiz_len,
-                    self.app.learning_group_index + 1
-                ));
-                self.ensure_indices();
-                return;
-            }
+        if let Some(quiz_len) = self.active_group_quiz_len()
+            && self.app.learning_quiz_index > 0
+        {
+            self.app.learning_quiz_index -= 1;
+            self.app.learning_option_index = 0;
+            self.reset_feedback();
+            log_debug(&format!(
+                "App: moved to question {} of {} in group {}",
+                self.app.learning_quiz_index + 1,
+                quiz_len,
+                self.app.learning_group_index + 1
+            ));
+            self.ensure_indices();
+            return;
         }
 
         if self.move_to_previous_group_with_quiz() {

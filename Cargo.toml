@@ -19,10 +19,10 @@ toml = "0.9"
 rig = { package = "rig-core", version = "0.32.0" }
 tokio = { version = "1.37", features = ["macros", "rt-multi-thread", "process", "io-util"] }
 dotenvy = "0.15"
-rand = "0.9"
+rand = "0.10"
 rusqlite = { version = "0.31", features = ["bundled"] }
 regex = "1.11"
-html2text = "0.13"
+html2text = "0.16"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "charset", "http2", "multipart"] }
 
 [dev-dependencies]

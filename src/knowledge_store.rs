@@ -187,10 +187,8 @@ pub(crate) fn load_analytics_snapshot_from_path(
         let mut stmt =
             connection.prepare("SELECT DISTINCT knowledge_type_group FROM knowledge_responses")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        for result in rows {
-            if let Ok(group) = result {
-                groups.insert(group);
-            }
+        for group in rows.flatten() {
+            groups.insert(group);
         }
     }
 
@@ -198,7 +196,7 @@ pub(crate) fn load_analytics_snapshot_from_path(
     let mut cumulative_groups: BTreeSet<String> = BTreeSet::new();
     for offset in 0..days {
         let date = start + Duration::days(offset as i64);
-        let mut summary = daily_map.remove(&date).unwrap_or_else(|| DailyAnalytics {
+        let mut summary = daily_map.remove(&date).unwrap_or(DailyAnalytics {
             date,
             total_questions: 0,
             first_try_correct: 0,

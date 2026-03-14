@@ -420,7 +420,7 @@ pub(crate) fn trigger_deep_dive_response_from_session(app: &mut App, session: Se
                     "Finalizing deep dive...",
                     95,
                 );
-                let _ = sender.send(AiTaskMessage::DeepDiveSuccess(result));
+                let _ = sender.send(AiTaskMessage::DeepDiveSuccess(Box::new(result)));
             }
             Err(err) => {
                 let _ = sender.send(AiTaskMessage::Error(
@@ -494,10 +494,10 @@ impl App {
             .map(|start| start.elapsed().as_secs())
             .unwrap_or(0);
 
-        if let Some(last_step) = self.ai_progress_timeline.last_mut() {
-            if last_step.completed_at_secs.is_none() {
-                last_step.completed_at_secs = Some(elapsed_secs);
-            }
+        if let Some(last_step) = self.ai_progress_timeline.last_mut()
+            && last_step.completed_at_secs.is_none()
+        {
+            last_step.completed_at_secs = Some(elapsed_secs);
         }
     }
 
@@ -557,12 +557,11 @@ fn write_ai_response(app: &App, response: &StructuredLearningResponse) -> Result
 
 pub(crate) fn poll_ai_messages(app: &mut App) {
     let mut clear_receiver = false;
-    loop {
-        let next_message = match app.ai_result_receiver.as_ref() {
-            Some(receiver) => receiver.try_recv(),
-            None => break,
-        };
-
+    while let Some(next_message) = app
+        .ai_result_receiver
+        .as_ref()
+        .map(|receiver| receiver.try_recv())
+    {
         match next_message {
             Ok(message) => match message {
                 AiTaskMessage::LearningSuccess(response) => {
@@ -580,7 +579,7 @@ pub(crate) fn poll_ai_messages(app: &mut App) {
                     app.ai_loading_start = None;
                     app.ai_task_kind = None;
                     clear_receiver = true;
-                    handle_deep_dive_success(app, response);
+                    handle_deep_dive_success(app, *response);
                     break;
                 }
                 AiTaskMessage::Error(kind, message) => {
