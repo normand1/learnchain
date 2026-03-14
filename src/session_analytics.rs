@@ -522,7 +522,7 @@ fn parse_json_value(value: &str) -> Option<Value> {
 fn compact_text(value: &str) -> String {
     let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.len() > 80 {
-        format!("{}...", &collapsed[..77])
+        format!("{}...", collapsed.chars().take(77).collect::<String>())
     } else {
         collapsed
     }
@@ -603,6 +603,15 @@ mod tests {
         };
         session.analytics = analyze(&session);
         session
+    }
+
+    #[test]
+    fn compact_text_truncates_unicode_without_panicking() {
+        let text = "Clippy is the failing CI surface on the Dependabot branch. I’ll make the minimal warning-cleanup changes needed.";
+        let compacted = compact_text(text);
+
+        assert!(compacted.ends_with("..."));
+        assert!(compacted.chars().count() <= 80);
     }
 
     fn tool_call(
