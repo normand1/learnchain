@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.8] - 2026-03-15
+
+### Added
+
+- No new user-facing additions.
+
+### Changed
+
+- Fixed the reusable cross-platform test gating in the unified `Release` workflow so manual tag dispatches run the release pipeline correctly.
+- Updated the npm publish job to read `NPM_TOKEN` from GitHub Actions secrets during release publishing.
+
+### Fixed
+
+- Released the LearnChain export URL fix in a publishable npm package so successful exports now point to `/dashboard/documents/<id>` instead of the raw `/api/documents/<id>` endpoint.
+
+
 ## [0.4.7] - 2026-03-14
 
 ### Added
