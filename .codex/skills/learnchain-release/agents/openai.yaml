@@ -1,0 +1,4 @@
+interface:
+  display_name: "LearnChain Release"
+  short_description: "Prepare and publish a LearnChain release"
+  default_prompt: "Use $learnchain-release to prepare and publish the next LearnChain release for this repository. Use the repo release script and release workflow, and verify both GitHub and npm before closing out."

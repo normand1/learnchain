@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.7] - 2026-03-14
+
+### Added
+
+- Added `scripts/prepare_release.sh` to update version files and scaffold release notes for new versions.
+- Added a repo-local maintainer release skill at `.codex/skills/learnchain-release/` for repeatable tag-and-publish operations.
+
+### Changed
+
+- Collapsed the old two-workflow release handoff into a single `Release` GitHub Actions workflow that tests, builds, creates the GitHub release, and publishes to npm in one run.
+- Switched release gating and cross-platform checks to Linux plus macOS, removing Windows from the release-critical path to reduce publish latency.
+- Documented the maintainer release process in `docs/releasing.md` and linked it from the README.
+
+### Fixed
+
+- Updated LearnChain export URLs to point at `/dashboard/documents/<id>` instead of the raw `/api/documents/<id>` endpoint.
+
+
 ## [0.4.6] - 2026-03-14
 
 ### Changed

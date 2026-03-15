@@ -1,0 +1,218 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish (for example v0.4.7)
+        required: true
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  resolve-release-tag:
+    name: Resolve release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Resolve tag from trigger
+        id: resolve
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+
+          if [ -z "$TAG" ] || ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Expected a semver tag like v0.4.7, got: ${TAG:-<empty>}" >&2
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  cross-platform-tests:
+    needs: resolve-release-tag
+    permissions:
+      contents: read
+    uses: ./.github/workflows/cross-platform-tests.yml
+    with:
+      ref: ${{ needs.resolve-release-tag.outputs.tag }}
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs:
+      - resolve-release-tag
+      - cross-platform-tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary_name: learnchain-darwin-arm64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary_name: learnchain-darwin-x64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: learnchain-linux-x64
+
+    steps:
+      - name: Checkout release ref
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-release-tag.outputs.tag }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare binary artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/learnchain dist/${{ matrix.binary_name }}
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.binary_name }}
+          path: dist/${{ matrix.binary_name }}
+          if-no-files-found: error
+
+  create-release:
+    name: Create GitHub release
+    needs:
+      - resolve-release-tag
+      - build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release ref
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-release-tag.outputs.tag }}
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist-artifacts
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          mkdir -p dist
+          find dist-artifacts -type f -exec cp {} dist/ \;
+          ls -lh dist/
+
+      - name: Create or update GitHub release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ needs.resolve-release-tag.outputs.tag }}
+          files: dist/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          overwrite_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish:
+    name: Publish to npm
+    needs:
+      - resolve-release-tag
+      - build
+      - create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PACKAGE_NAME: learnchain
+      RELEASE_TAG: ${{ needs.resolve-release-tag.outputs.tag }}
+    steps:
+      - name: Checkout release ref
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: dist-artifacts
+
+      - name: Prepare npm dist directory
+        shell: bash
+        run: |
+          rm -rf dist
+          mkdir -p dist
+          find dist-artifacts -type f -exec cp {} dist/ \;
+          ls -lh dist/
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Upgrade npm for trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      - name: Align package version with release tag
+        shell: bash
+        run: |
+          VERSION=${RELEASE_TAG#v}
+          if [ -z "$VERSION" ]; then
+            echo "Unable to derive version from tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
+
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          echo "Release tag version: $VERSION"
+          echo "Current package version: $CURRENT_VERSION"
+
+          if [ "$CURRENT_VERSION" != "$VERSION" ]; then
+            npm version "$VERSION" --no-git-tag-version
+          fi
+
+          echo "PACKAGE_VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Check npm for existing version
+        id: version_check
+        shell: bash
+        run: |
+          if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Version $PACKAGE_VERSION already exists on npm."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate launcher script
+        if: steps.version_check.outputs.exists != 'true'
+        run: node scripts/generate-launcher.js
+
+      - name: Verify package contents
+        if: steps.version_check.outputs.exists != 'true'
+        run: npm pack --dry-run
+
+      - name: Publish to npm
+        if: steps.version_check.outputs.exists != 'true'
+        run: npm publish --provenance --access public

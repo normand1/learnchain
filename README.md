@@ -207,6 +207,17 @@ cargo clippy --all-targets --all-features
 npm run build
 ```
 
+### Releasing
+
+The release and npm publish process is documented in
+[docs/releasing.md](/Users/davidnorman/learnchain/docs/releasing.md).
+
+The local helper for preparing a new release is:
+
+```bash
+scripts/prepare_release.sh 0.4.7
+```
+
 ## Project Structure
 
 ```text

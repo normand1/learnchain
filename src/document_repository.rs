@@ -616,8 +616,9 @@ impl LearnChainClient {
 
     fn document_url(&self, document_id: &str) -> String {
         format!(
-            "{}{}/{}",
-            self.site_url, LEARNCHAIN_DOCUMENTS_PATH, document_id
+            "{}/documents/{}",
+            config::learnchain_dashboard_url(&self.site_url),
+            document_id
         )
     }
 
@@ -1773,6 +1774,40 @@ mod tests {
         assert_eq!(
             normalize_learnchain_site_url("https://www.learnchain.co/"),
             "https://www.learnchain.co"
+        );
+    }
+
+    #[test]
+    fn learnchain_document_url_uses_dashboard_path() {
+        let client = LearnChainClient {
+            client: build_learnchain_client().expect("client"),
+            site_url: "https://learnchain.co".to_string(),
+            access_token: String::new(),
+            refresh_token: String::new(),
+            email: String::new(),
+            password: String::new(),
+        };
+
+        assert_eq!(
+            client.document_url("025f92ed-f08e-464d-ab13-68940f14df73"),
+            "https://www.learnchain.co/dashboard/documents/025f92ed-f08e-464d-ab13-68940f14df73"
+        );
+    }
+
+    #[test]
+    fn learnchain_document_url_preserves_local_site_origin() {
+        let client = LearnChainClient {
+            client: build_learnchain_client().expect("client"),
+            site_url: "http://localhost:3000/".to_string(),
+            access_token: String::new(),
+            refresh_token: String::new(),
+            email: String::new(),
+            password: String::new(),
+        };
+
+        assert_eq!(
+            client.document_url("doc-123"),
+            "http://localhost:3000/dashboard/documents/doc-123"
         );
     }
 
