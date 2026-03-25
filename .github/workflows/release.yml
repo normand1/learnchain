@@ -234,6 +234,7 @@ jobs:
       - name: Prepare release assets
         shell: bash
         run: |
+          rm -rf dist
           mkdir -p dist
           find dist-artifacts -type f -exec cp {} dist/ \;
           ls -lh dist/

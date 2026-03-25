@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.10] - 2026-03-24
+
+### Added
+
+- No new user-facing additions.
+
+### Changed
+
+- No user-facing behavior changes in the application.
+
+### Fixed
+
+- Fixed the GitHub release job to clear the checked-out `dist/` directory before copying build artifacts so the zero-byte `.gitkeep` placeholder is not uploaded as a release asset.
+- Fixed the one-click release pipeline so OIDC-based npm publishing can proceed past GitHub release creation.
+
+
 ## [0.4.9] - 2026-03-24
 
 ### Added
