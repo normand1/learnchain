@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.9] - 2026-03-24
+
+### Added
+
+- Added manual `workflow_dispatch` support to the `Cross-platform Tests` workflow so release candidates can be validated on macOS and Linux before a tag or GitHub release exists.
+
+### Changed
+
+- Switched npm publication from `NPM_TOKEN` secrets to npm trusted publishing over GitHub OIDC.
+- Reworked the `Release` workflow into a manual one-click publish path that validates a release-prepared ref, builds artifacts, creates the tag, creates the GitHub release, and publishes to npm from the same run.
+- Updated the maintainer release guide to document the new preflight and OIDC-based publish flow.
+
+### Fixed
+
+- Fixed the release pipeline so versioned npm publication no longer depends on long-lived npm auth tokens or a tag being pushed ahead of release validation.
+
+
 ## [0.4.8] - 2026-03-15
 
 ### Added
