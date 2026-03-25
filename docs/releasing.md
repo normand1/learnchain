@@ -1,28 +1,66 @@
 # Releasing LearnChain
 
-This document describes the current release flow for LearnChain, the exact steps
-to cut a release, and the changes worth making to simplify the pipeline.
+This document describes the current LearnChain release flow and the exact steps
+to cut a release with GitHub Actions and npm trusted publishing.
 
 ## Current release flow
 
-The release path now uses one GitHub Actions workflow:
+The release path now uses two GitHub Actions workflows:
 
-1. `Release`
-   - Triggered by pushing a `v*` tag or by manual `workflow_dispatch` with a tag input.
-   - Resolves the release tag once at the start of the run.
-   - Runs the reusable cross-platform test workflow on:
+1. `Cross-platform Tests`
+   - Runs automatically for:
+     - labeled PRs with the `ready to merge` label
+     - pushes to `main`, `master`, and `develop`
+   - Can also be run manually with a `ref` input for release preflight checks.
+   - Runs the reusable cross-platform matrix on:
      - `ubuntu-latest`
      - `macos-latest`
+
+2. `Release`
+   - Triggered manually with:
+     - `version` such as `0.4.9`
+     - optional `ref`, which defaults to `master`
+   - Validates the checked-out ref before tagging:
+     - `Cargo.toml` and `package.json` versions must match
+     - both must already equal the requested release version
+     - `CHANGELOG.md` must already contain the release entry
+     - `docs/releases/vX.Y.Z.md` must already exist
+     - the tag must not already exist locally or on origin
+   - Runs the reusable cross-platform test workflow against the selected ref.
    - Builds release binaries for:
      - `aarch64-apple-darwin`
      - `x86_64-apple-darwin`
      - `x86_64-unknown-linux-gnu`
+   - Creates and pushes the release tag after validation and builds succeed.
    - Creates or updates the GitHub release with those binary assets.
-   - Publishes the npm package from the same workflow run using the same binary artifacts.
+   - Publishes the npm package from the same workflow run using npm trusted publishing over OIDC.
+
+## Trusted publisher configuration
+
+The package uses npm trusted publishing over OIDC.
+
+If the trusted publisher ever needs to be recreated, configure it on npm with:
+
+1. Open the package settings on npmjs.com.
+2. Add a GitHub Actions trusted publisher with:
+   - owner: `normand1`
+   - repository: `learnchain`
+   - workflow filename: `release.yml`
+3. Leave the environment blank unless the workflow later adds a GitHub
+   environment gate.
+
+Notes:
+
+- npm trusted publishing requires a GitHub-hosted runner.
+- The publish job uses Node `24`.
+- The publish job runs `npm ci` before packaging and publishing.
+- The publish job verifies npm CLI `11.5.1` or newer before publishing.
+- After trusted publishing is verified, remove the old `NPM_TOKEN` secret from
+  the GitHub repository.
 
 ## Release checklist
 
-Use this checklist when cutting a new version such as `0.4.7`.
+Use this checklist when cutting a new version such as `0.4.9`.
 
 ### 1. Run the release prep script
 
@@ -66,7 +104,7 @@ These three checks catch most release blockers:
 - failing Rust tests
 - broken npm package contents
 
-### 3. Commit the release
+### 3. Commit and merge the release-prepared change
 
 Use the current convention:
 
@@ -78,40 +116,48 @@ git add \
 git commit -m "Prepare vX.Y.Z release"
 ```
 
-Note: CI workflows intentionally skip some normal push checks for commits with
+Merge that release-prepared commit to `master` before running the publish
+workflow. The release workflow expects the target ref to already contain the
+final version metadata, changelog entry, and release notes.
+
+Note: some CI workflows intentionally skip normal push checks for commits with
 this release message pattern.
 
-### 4. Create and push the tag
+### 4. Optionally run manual cross-platform preflight
 
-```bash
-git tag -a vX.Y.Z -m "vX.Y.Z"
-git push origin master
-git push origin vX.Y.Z
-```
+Before finalizing the release, you can run the `Cross-platform Tests` workflow
+manually against:
 
-If the default branch is `main` in the future, replace `master` accordingly.
+- `master`
+- a release-prepared branch
+- a specific commit SHA
 
-### 5. Monitor GitHub Actions
+This is the way to validate macOS and Linux behavior before any tag or GitHub
+release exists.
 
-Check:
+### 5. Run the release workflow
 
-- `Release`
+From the GitHub Actions UI, run `Release` with:
 
-Useful commands:
+- `version=X.Y.Z`
+- optional `ref=master`
+
+The workflow will:
+
+1. validate the release metadata on the chosen ref
+2. run cross-platform tests
+3. build release binaries
+4. create and push tag `vX.Y.Z`
+5. create the GitHub release
+6. publish `learnchain@X.Y.Z` to npm
+
+Useful monitoring commands:
 
 ```bash
 gh run list --limit 10
 gh run watch <run-id> --exit-status
 gh release view vX.Y.Z
 ```
-
-Expected order:
-
-1. Cross-platform tests finish
-2. Binary builds finish
-3. GitHub release appears with binary assets
-4. npm package verification runs
-5. npm publish completes successfully
 
 ### 6. Verify the release externally
 
@@ -123,91 +169,6 @@ npm view learnchain version
 npm view learnchain@X.Y.Z version
 ```
 
-## Current pain points
-
-The current flow works, but it is more complicated than it needs to be.
-
-### Release notes still require human editing
-
-The prep script creates the right files and placeholders, but the release
-summary still needs to be written by hand.
-
-### Release monitoring is manual
-
-The operator still has to watch the workflow and verify npm manually.
-
-## Recommended simplifications
-
-These changes would reduce the number of moving parts materially.
-
-### 1. Keep release validation small and explicit
-
-Recommended release preflight:
-
-- `cargo fmt`
-- `cargo test -- --nocapture`
-- `npm pack --dry-run`
-
-Avoid layering extra release-only checks on top unless they catch a real class
-of failures not already covered by CI.
-
-### 2. Consider a manual release dispatch workflow later
-
-If you want fewer local git steps, a future manual release workflow could accept
-a version input and do some combination of:
-
-- validate that the tree is clean
-- create the tag
-- push the tag
-- run the release pipeline
-
-I would not start there. The single release workflow and local prep script are
-already in place.
-
-## Should this become a skill?
-
-Yes.
-
-A skill is a good fit because this process is:
-
-- repetitive
-- repo-specific
-- operationally sensitive
-- easy to partially complete
-
-The skill should not just be prose. It should pair a short `SKILL.md` with a
-bundled script for the mechanical parts.
-
-Recommended skill scope:
-
-- verify the repo is in a releasable state
-- run the local preflight checks
-- bump version files
-- scaffold release notes
-- create the release commit and tag
-- push branch and tag
-- monitor GitHub Actions
-- verify GitHub release assets and npm publication
-
-Recommended skill dependencies:
-
-- `git`
-- `gh`
-- `npm`
-- the local release-prep script
-
-Recommended timing:
-
-- create the skill now that the release flow is a single pipeline
-- keep the script as the mechanical backbone so the skill stays short and reliable
-
-The repo-local maintainer skill lives at:
-
-- `.codex/skills/learnchain-release/SKILL.md`
-
-## Recommended next steps
-
-In order:
-
-1. Keep the Windows removal in place so release latency stays reasonable.
-2. Create a repo-local release skill that wraps the process.
+If the publish job was already verified with trusted publishing, remove the old
+`NPM_TOKEN` secret from the repository settings so npm publication is fully
+OIDC-based.

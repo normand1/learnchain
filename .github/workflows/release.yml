@@ -3,13 +3,15 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
-      tag:
-        description: Release tag to publish (for example v0.4.7)
+      version:
+        description: Release version to publish (for example 0.4.9)
         required: true
         type: string
-  push:
-    tags:
-      - "v*"
+      ref:
+        description: Git ref to release
+        required: false
+        default: master
+        type: string
 
 permissions:
   contents: write
@@ -17,40 +19,117 @@ permissions:
 
 jobs:
   resolve-release-tag:
-    name: Resolve release tag
+    name: Resolve release inputs
     runs-on: ubuntu-latest
     outputs:
+      version: ${{ steps.resolve.outputs.version }}
       tag: ${{ steps.resolve.outputs.tag }}
+      ref: ${{ steps.resolve.outputs.ref }}
+      release_notes_path: ${{ steps.resolve.outputs.release_notes_path }}
     steps:
-      - name: Resolve tag from trigger
+      - name: Resolve version, tag, and ref
         id: resolve
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ github.event.inputs.tag }}"
-          else
-            TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${{ inputs.version }}"
+          REF="${{ inputs.ref }}"
+
+          if [ -z "$REF" ]; then
+            REF="master"
           fi
 
-          if [ -z "$TAG" ] || ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Expected a semver tag like v0.4.7, got: ${TAG:-<empty>}" >&2
+          if [ -z "$VERSION" ] || ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Expected a semver version like 0.4.9, got: ${VERSION:-<empty>}" >&2
             exit 1
           fi
 
+          TAG="v$VERSION"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "release_notes_path=docs/releases/${TAG}.md" >> "$GITHUB_OUTPUT"
+
+  validate-release:
+    name: Validate release metadata
+    needs: resolve-release-tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout release ref
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-release-tag.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Validate versions, notes, and tag availability
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.resolve-release-tag.outputs.version }}
+          RELEASE_TAG: ${{ needs.resolve-release-tag.outputs.tag }}
+          RELEASE_NOTES_PATH: ${{ needs.resolve-release-tag.outputs.release_notes_path }}
+        run: |
+          cargo_version="$(
+            perl -0ne '
+              if (/\[package\]\n(?:(?!\n\[).*\n)*?version = "([^"]+)"/s) {
+                print "$1\n";
+                exit 0;
+              }
+              exit 1;
+            ' Cargo.toml
+          )"
+          package_version="$(node -p "require('./package.json').version")"
+
+          echo "Cargo.toml version: $cargo_version"
+          echo "package.json version: $package_version"
+          echo "Requested version: $RELEASE_VERSION"
+
+          if [ "$cargo_version" != "$package_version" ]; then
+            echo "Cargo.toml version does not match package.json version." >&2
+            exit 1
+          fi
+
+          if [ "$cargo_version" != "$RELEASE_VERSION" ]; then
+            echo "Requested version does not match the checked-out release metadata." >&2
+            exit 1
+          fi
+
+          if ! grep -Fq "## [$RELEASE_VERSION] -" CHANGELOG.md; then
+            echo "CHANGELOG.md is missing an entry for $RELEASE_VERSION." >&2
+            exit 1
+          fi
+
+          if [ ! -f "$RELEASE_NOTES_PATH" ]; then
+            echo "Release notes are missing: $RELEASE_NOTES_PATH" >&2
+            exit 1
+          fi
+
+          if git rev-parse -q --verify "refs/tags/$RELEASE_TAG" >/dev/null; then
+            echo "Tag $RELEASE_TAG already exists in the checkout." >&2
+            exit 1
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Tag $RELEASE_TAG already exists on origin." >&2
+            exit 1
+          fi
 
   cross-platform-tests:
-    needs: resolve-release-tag
+    needs:
+      - resolve-release-tag
+      - validate-release
     permissions:
       contents: read
     uses: ./.github/workflows/cross-platform-tests.yml
     with:
-      ref: ${{ needs.resolve-release-tag.outputs.tag }}
+      ref: ${{ needs.resolve-release-tag.outputs.ref }}
 
   build:
     name: Build ${{ matrix.target }}
     needs:
       - resolve-release-tag
+      - validate-release
       - cross-platform-tests
     runs-on: ${{ matrix.os }}
     strategy:
@@ -71,7 +150,8 @@ jobs:
       - name: Checkout release ref
         uses: actions/checkout@v6
         with:
-          ref: ${{ needs.resolve-release-tag.outputs.tag }}
+          ref: ${{ needs.resolve-release-tag.outputs.ref }}
+          fetch-depth: 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -94,10 +174,47 @@ jobs:
           path: dist/${{ matrix.binary_name }}
           if-no-files-found: error
 
+  create-tag:
+    name: Create release tag
+    needs:
+      - resolve-release-tag
+      - validate-release
+      - build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release ref
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve-release-tag.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Create and push annotated tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.resolve-release-tag.outputs.tag }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/$RELEASE_TAG" >/dev/null; then
+            echo "Tag $RELEASE_TAG already exists in the checkout." >&2
+            exit 1
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Tag $RELEASE_TAG already exists on origin." >&2
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$RELEASE_TAG" -m "$RELEASE_TAG"
+          git push origin "refs/tags/$RELEASE_TAG"
+
   create-release:
     name: Create GitHub release
     needs:
       - resolve-release-tag
+      - create-tag
       - build
     runs-on: ubuntu-latest
     permissions:
@@ -107,6 +224,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           ref: ${{ needs.resolve-release-tag.outputs.tag }}
+          fetch-depth: 0
 
       - name: Download all binary artifacts
         uses: actions/download-artifact@v8
@@ -121,13 +239,13 @@ jobs:
           ls -lh dist/
 
       - name: Create or update GitHub release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.resolve-release-tag.outputs.tag }}
           files: dist/*
+          body_path: ${{ needs.resolve-release-tag.outputs.release_notes_path }}
           draft: false
           prerelease: false
-          generate_release_notes: true
           overwrite_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -136,21 +254,22 @@ jobs:
     name: Publish to npm
     needs:
       - resolve-release-tag
-      - build
       - create-release
+      - build
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
     env:
       PACKAGE_NAME: learnchain
+      PACKAGE_VERSION: ${{ needs.resolve-release-tag.outputs.version }}
       RELEASE_TAG: ${{ needs.resolve-release-tag.outputs.tag }}
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - name: Checkout release ref
         uses: actions/checkout@v6
         with:
           ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
 
       - name: Download binary artifacts
         uses: actions/download-artifact@v8
@@ -166,54 +285,57 @@ jobs:
           ls -lh dist/
 
       - name: Setup Node.js
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Upgrade npm for trusted publishing
-        run: |
-          npm install -g npm@latest
-          npm --version
+      - name: Install npm dependencies
+        run: npm ci
 
-      - name: Align package version with release tag
+      - name: Verify npm version supports trusted publishing
         shell: bash
         run: |
-          VERSION=${RELEASE_TAG#v}
-          if [ -z "$VERSION" ]; then
-            echo "Unable to derive version from tag: $RELEASE_TAG" >&2
+          CURRENT_NPM_VERSION="$(npm --version)"
+          echo "npm version: $CURRENT_NPM_VERSION"
+          node -e "
+            const current = process.argv[1].split('.').map(Number);
+            const required = process.argv[2].split('.').map(Number);
+            for (let i = 0; i < Math.max(current.length, required.length); i += 1) {
+              const a = current[i] ?? 0;
+              const b = required[i] ?? 0;
+              if (a > b) process.exit(0);
+              if (a < b) {
+                console.error(\`npm \${process.argv[1]} is older than required \${process.argv[2]}.\`);
+                process.exit(1);
+              }
+            }
+          " "$CURRENT_NPM_VERSION" "11.5.1"
+
+      - name: Verify release version matches package metadata
+        shell: bash
+        run: |
+          CURRENT_VERSION="$(node -p "require('./package.json').version")"
+          echo "package.json version: $CURRENT_VERSION"
+          echo "Release version: $PACKAGE_VERSION"
+          if [ "$CURRENT_VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "package.json version does not match the requested release version." >&2
             exit 1
           fi
 
-          CURRENT_VERSION=$(node -p "require('./package.json').version")
-          echo "Release tag version: $VERSION"
-          echo "Current package version: $CURRENT_VERSION"
-
-          if [ "$CURRENT_VERSION" != "$VERSION" ]; then
-            npm version "$VERSION" --no-git-tag-version
-          fi
-
-          echo "PACKAGE_VERSION=$VERSION" >> "$GITHUB_ENV"
-
       - name: Check npm for existing version
-        id: version_check
         shell: bash
         run: |
           if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Version $PACKAGE_VERSION already exists on npm."
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Version $PACKAGE_VERSION already exists on npm." >&2
+            exit 1
           fi
 
       - name: Generate launcher script
-        if: steps.version_check.outputs.exists != 'true'
         run: node scripts/generate-launcher.js
 
       - name: Verify package contents
-        if: steps.version_check.outputs.exists != 'true'
         run: npm pack --dry-run
 
       - name: Publish to npm
-        if: steps.version_check.outputs.exists != 'true'
-        run: npm publish --provenance --access public
+        run: npm publish
