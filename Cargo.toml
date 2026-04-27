@@ -17,7 +17,7 @@ serde_json = "1.0"
 schemars = "1.0.4"
 toml = "0.9"
 rig = { package = "rig-core", version = "0.32.0" }
-tokio = { version = "1.37", features = ["macros", "rt-multi-thread", "process", "io-util"] }
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "process", "io-util"] }
 dotenvy = "0.15"
 rand = "0.10"
 rusqlite = { version = "0.31", features = ["bundled"] }
